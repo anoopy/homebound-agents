@@ -154,7 +154,7 @@ class RoutingConfig:
     thread_routing: bool = True
     keyword_routing: bool = True
     llm_routing: bool = False
-    llm_model: str = "claude-haiku-4-5-20251001"
+    llm_model: str = "claude-haiku-4-5"
     keyword_match_threshold: int = 2
     auto_spawn_on_no_match: bool = True
     max_message_map_size: int = 200

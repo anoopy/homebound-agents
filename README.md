@@ -134,6 +134,7 @@ scripts/homeboundctl.sh start --config homebound.yaml
 @homebound help                              → list all commands
 @homebound status                            → show active sessions
 @Claude fix the login bug for #42            → spawn agent on issue #42
+what about the auth middleware?               → smart-routed to the right agent (llm_routing: true)
 @Claude1 close                               → close session 1
 ```
 
@@ -259,7 +260,7 @@ All configuration lives in `homebound.yaml`. Run `homebound init` to generate a 
 | `keyword_routing` | `true` | Route via keyword overlap between message and session context |
 | `keyword_match_threshold` | `2` | Minimum keyword overlap score to trigger routing |
 | `llm_routing` | `false` | **Recommended.** Use Claude Haiku to classify bare messages to the best active session. Set to `true` and provide `ANTHROPIC_API_KEY` for significantly smarter routing. |
-| `llm_model` | `"claude-haiku-4-5-20251001"` | Model used for LLM routing |
+| `llm_model` | `"claude-haiku-4-5"` | Model used for LLM routing |
 | `auto_spawn_on_no_match` | `true` | Auto-spawn a new session when no match found |
 | `max_message_map_size` | `200` | Max entries in the thread-to-session map (pruned at 75%) |
 
