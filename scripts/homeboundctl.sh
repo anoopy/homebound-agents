@@ -122,11 +122,11 @@ case "$CMD" in
       fi
       echo "Re-attaching orchestrator to existing session '$SESSION' (orphaned children will be re-adopted)..."
       tmux new-window "${TMUX_ENV_FLAGS[@]}" -t "$SESSION" -n orchestrator -c "$PROJECT_DIR" \
-        "$HOMEBOUND_BIN start ${CONFIG_FLAG}; echo '[Homebound exited. Press Enter to close.]'; read"
+        "export PATH=\"$PATH\"; $HOMEBOUND_BIN start ${CONFIG_FLAG}; echo '[Homebound exited. Press Enter to close.]'; read"
     else
       echo "Starting Homebound in tmux session '$SESSION'..."
       tmux new-session "${TMUX_ENV_FLAGS[@]}" -d -s "$SESSION" -n orchestrator -c "$PROJECT_DIR" \
-        "$HOMEBOUND_BIN start ${CONFIG_FLAG}; echo '[Homebound exited. Press Enter to close.]'; read"
+        "export PATH=\"$PATH\"; $HOMEBOUND_BIN start ${CONFIG_FLAG}; echo '[Homebound exited. Press Enter to close.]'; read"
     fi
     echo "Homebound started. Use 'homeboundctl.sh attach${CONFIG_FILE:+ --config $CONFIG_FILE}' to connect."
     echo "Log: ${LOG_DIR}/homebound.log"
@@ -139,10 +139,10 @@ case "$CMD" in
         exit 1
       fi
       tmux new-window "${TMUX_ENV_FLAGS[@]}" -t "$SESSION" -n orchestrator -c "$PROJECT_DIR" \
-        "$HOMEBOUND_BIN start --dry-run ${CONFIG_FLAG}; echo '[Homebound exited. Press Enter to close.]'; read"
+        "export PATH=\"$PATH\"; $HOMEBOUND_BIN start --dry-run ${CONFIG_FLAG}; echo '[Homebound exited. Press Enter to close.]'; read"
     else
       tmux new-session "${TMUX_ENV_FLAGS[@]}" -d -s "$SESSION" -n orchestrator -c "$PROJECT_DIR" \
-        "$HOMEBOUND_BIN start --dry-run ${CONFIG_FLAG}; echo '[Homebound exited. Press Enter to close.]'; read"
+        "export PATH=\"$PATH\"; $HOMEBOUND_BIN start --dry-run ${CONFIG_FLAG}; echo '[Homebound exited. Press Enter to close.]'; read"
     fi
     echo "Homebound started (dry run)."
     ;;

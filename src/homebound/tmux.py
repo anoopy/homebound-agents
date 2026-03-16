@@ -13,10 +13,28 @@ import logging
 logger = logging.getLogger("homebound.tmux")
 
 
+import os
+import shutil
+
+
+def _find_tmux() -> str:
+    """Locate the tmux binary, checking common paths if not on PATH."""
+    found = shutil.which("tmux")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "tmux"
+
+
+_TMUX_BIN = _find_tmux()
+
+
 async def run_tmux(*args: str) -> tuple[int, str, str]:
     """Run a tmux command and return (returncode, stdout, stderr)."""
     proc = await asyncio.create_subprocess_exec(
-        "tmux",
+        _TMUX_BIN,
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
