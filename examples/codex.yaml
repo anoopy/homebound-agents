@@ -1,0 +1,44 @@
+# homebound.yaml — Example configuration for OpenAI Codex CLI
+#
+# Codex CLI (https://github.com/openai/codex) works with homebound via
+# the "generic" runtime adapter. Install with: npm i -g @openai/codex
+#
+# Key flags:
+#   --no-alt-screen   Required for tmux — without this, Codex uses an
+#                     alternate screen buffer that breaks pane capture
+#   --full-auto       Lets Codex run commands without approval prompts
+#                     (uses sandbox + on-request approval policy)
+#   -C <dir>          Set working directory (homebound handles this)
+#
+# Note: On first run in a new directory, Codex shows a "trust this folder"
+# prompt. Accept it manually once via: scripts/homeboundctl.sh attach
+
+orchestrator:
+  name: "homebound"
+
+transport:
+  type: "slack"
+  channel_id: "CXXXXXXXXXX"  # Your Slack channel ID
+  token_env: "SLACK_BOT_TOKEN"
+
+tracker:
+  type: "github"
+  project_dir: "."
+
+runtime:
+  type: "generic"
+  command: "codex --no-alt-screen --full-auto"
+  idle_markers: ["›"]       # Codex uses › (U+203A) as its input prompt
+  exit_command: "/exit"      # Codex exits with Ctrl-D; /exit is a fallback
+  env_unset: []
+
+sessions:
+  max_concurrent: 5
+  poll_interval: 10
+
+routing:
+  llm_routing: true          # Requires ANTHROPIC_API_KEY
+
+security:
+  allowed_users: []
+  allow_open_channel: true

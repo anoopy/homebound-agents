@@ -1,0 +1,56 @@
+# homebound.yaml — Example configuration
+# Copy to your project root and customize.
+# This file is gitignored by default when placed at the repo root.
+
+orchestrator:
+  name: "homebound"
+  aliases: ["hb"]  # @hb works as shorthand for @homebound
+
+transport:
+  type: "slack"
+  channel_id: "CXXXXXXXXXX"  # Replace with your Slack channel ID
+  token_env: "SLACK_BOT_TOKEN"
+  lookback_minutes: 5
+  message_format: "*[{name}]* {message}"
+  strip_prefixes: ["claude-desktop"]
+  # Agents use this command to post results back to Slack.
+  # Requires SLACK_BOT_TOKEN and SLACK_CHANNEL_ID in the tmux environment.
+  post_command_template: >-
+    scripts/slack_post.sh --name {session_name} --post "{message}"
+
+tracker:
+  type: "github"
+  project_dir: "."  # Uses current working directory
+  admin_pattern: '^@{name}\s+(.+)'
+
+runtime:
+  type: "claude-code"
+  command: "claude"
+  idle_markers: ["\u276f", "> "]
+  exit_command: "/exit"
+  env_unset: ["CLAUDECODE"]
+
+sessions:
+  max_concurrent: 5
+  idle_timeout: 1800
+  poll_interval: 10
+
+routing:
+  thread_routing: true             # Route thread replies to the session that posted the parent
+  keyword_routing: true            # Route via keyword overlap between message and session context
+  llm_routing: true                # Recommended — requires ANTHROPIC_API_KEY
+  auto_spawn_on_no_match: true     # Auto-spawn a new session when no match found
+
+modes:
+  default: "chat"
+  chat:
+    prompt_template: >-
+      You are handling {work_item_label}.
+      --- BEGIN TASK --- {task_text} --- END TASK ---
+      Post results to Slack: {post_command}
+
+security:
+  allowed_users: []  # Empty = allow all. Add Slack user IDs to restrict.
+  destructive_confirm_timeout: 60
+
+close_commands: ["close", "stop", "done", "exit", "quit", "kill"]

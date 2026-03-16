@@ -1,0 +1,31 @@
+# multi-project.yaml — Example with multiple projects
+#
+# Each project gets its own tmux session and orchestrator.
+# Start all: homeboundctl.sh start --config examples/multi-project.yaml
+#
+# NOTE: Multi-project support reads the first project by default.
+# For multiple projects, run separate instances with different config files.
+
+orchestrator:
+  name: "project-lead"
+
+transport:
+  type: "slack"
+  channel_id: "CXXXXXXXXXX"
+  token_env: "SLACK_BOT_TOKEN"
+
+tracker:
+  type: "github"
+  project_dir: "/path/to/your/project"
+
+runtime:
+  type: "claude-code"
+  command: "claude --dangerously-skip-permissions"
+
+sessions:
+  max_concurrent: 3
+  idle_timeout: 1800
+  poll_interval: 10
+
+security:
+  allowed_users: ["WFAKE00001"]  # Only this user can send commands
