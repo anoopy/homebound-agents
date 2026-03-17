@@ -78,6 +78,7 @@ class RuntimeConfig:
 class SessionsConfig:
     """Child session lifecycle configuration."""
 
+    agent_label: str = "Agent"  # User-facing name: Agent1, Agent2, etc.
     max_concurrent: int = 5
     idle_timeout: int = 1800  # 30 min
     init_timeout: int = 60
@@ -88,6 +89,22 @@ class SessionsConfig:
     max_retries: int = 3
     outage_threshold: int = 3       # consecutive poll failures before escalating
     outage_max_interval: int = 120  # max seconds between polls during outage
+
+    def __post_init__(self):
+        if not self.agent_label or not self.agent_label.isalpha():
+            raise ValueError(
+                f"agent_label must be non-empty and alphabetic, got: {self.agent_label!r}"
+            )
+
+    @property
+    def window_prefix(self) -> str:
+        """Tmux window prefix: AGENT- (derived from agent_label.upper())."""
+        return f"{self.agent_label.upper()}-"
+
+    @property
+    def session_prefix(self) -> str:
+        """Transport session prefix: agent- (derived from agent_label.lower())."""
+        return f"{self.agent_label.lower()}-"
 
 
 @dataclass
@@ -155,7 +172,7 @@ class RoutingConfig:
     keyword_routing: bool = True
     llm_routing: bool = False
     llm_model: str = "claude-haiku-4-5"
-    keyword_match_threshold: int = 2
+    keyword_match_threshold: int = 1
     auto_spawn_on_no_match: bool = True
     max_message_map_size: int = 200
     enrich_interval_cycles: int = 6  # Refresh keywords every N poll cycles (~60s at 10s poll)
@@ -246,9 +263,14 @@ class HomeboundConfig:
         return Path(self.tracker.project_dir).resolve()
 
     @property
+    def agent_label(self) -> str:
+        """Convenience accessor for sessions.agent_label."""
+        return self.sessions.agent_label
+
+    @property
     def ignored_prefixes(self) -> list[str]:
         """All prefixes to ignore when polling (prevents re-routing loops)."""
-        base = [self.name, "claude-", "Claude"]
+        base = [self.name, self.sessions.session_prefix, self.sessions.agent_label]
         base.extend(self.orchestrator.aliases)
         base.extend(self.transport.ignored_prefixes)
         return base

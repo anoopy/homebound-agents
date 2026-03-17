@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "Homebound Contributors" },
+    { name = "Homebound-Agents Contributors" },
 ]
 keywords = ["ai", "agents", "orchestrator", "tmux", "slack", "claude"]
 classifiers = [

@@ -100,10 +100,20 @@ print(cfg.get('tracker', {}).get('project_dir', '.'))
 PYEOF
   ) 2>/dev/null || PROJECT_DIR="."
   PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd || echo "$PROJECT_DIR")"
+  AGENT_LABEL=$($PY - "$CONFIG_FILE" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1]) as f:
+    cfg = yaml.safe_load(f) or {}
+print(cfg.get('sessions', {}).get('agent_label', 'Agent'))
+PYEOF
+  ) 2>/dev/null || AGENT_LABEL="Agent"
+  WINDOW_PREFIX="$(echo "$AGENT_LABEL" | tr '[:lower:]' '[:upper:]')-"
   CONFIG_FLAG="--config $CONFIG_FILE"
 else
   SESSION="homebound"
   PROJECT_DIR="$(pwd)"
+  AGENT_LABEL="Agent"
+  WINDOW_PREFIX="AGENT-"
   CONFIG_FLAG=""
 fi
 
@@ -115,6 +125,16 @@ mkdir -p "$LOG_DIR"
 # ---------------------------------------------------------------------------
 case "$CMD" in
   start)
+    # Guard against duplicate orchestrator processes (match Python homebound, not this script)
+    existing_pids=$(pgrep -f "[p]ython.*homebound start" 2>/dev/null || true)
+    if [ -n "$existing_pids" ]; then
+      echo "WARNING: Found existing homebound process(es):"
+      ps -p "$(echo "$existing_pids" | tr '\n' ',')" -o pid=,lstart=,command= 2>/dev/null || true
+      echo ""
+      echo "Kill them first with: kill $existing_pids"
+      echo "Or use 'homeboundctl.sh stop-all' to clean everything up."
+      exit 1
+    fi
     if tmux has-session -t "$SESSION" 2>/dev/null; then
       if tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -q "^orchestrator$"; then
         echo "Orchestrator already running in session '$SESSION'. Use 'attach' to connect or 'stop' to restart."
@@ -162,7 +182,14 @@ case "$CMD" in
     else
       echo "Orchestrator window not found in session '$SESSION'."
     fi
-    remaining=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep "^CLAUDE-" || true)
+    # Kill any orphaned homebound Python processes not tied to the tmux window
+    orphan_pids=$(pgrep -f "[p]ython.*homebound start" 2>/dev/null || true)
+    if [ -n "$orphan_pids" ]; then
+      echo "Killing orphaned homebound process(es): $orphan_pids"
+      kill $orphan_pids 2>/dev/null || true
+      sleep 1
+    fi
+    remaining=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^(${WINDOW_PREFIX}|CLAUDE-)" || true)
     if [ -n "$remaining" ]; then
       echo "Orchestrator stopped. Child sessions still running:"
       echo "$remaining" | sed 's/^/  /'
@@ -179,7 +206,7 @@ case "$CMD" in
       exit 0
     fi
     echo "Stopping everything in session '$SESSION'..."
-    children=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep "^CLAUDE-" || true)
+    children=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^(${WINDOW_PREFIX}|CLAUDE-)" || true)
     if [ -n "$children" ]; then
       for child in $children; do
         echo "  Sending /exit to ${child}..."
@@ -240,7 +267,7 @@ case "$CMD" in
     else
       echo "Orchestrator:   NOT RUNNING (children may be orphaned)"
     fi
-    children=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep "^CLAUDE-" || true)
+    children=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^(${WINDOW_PREFIX}|CLAUDE-)" || true)
     if [ -n "$children" ]; then
       child_count=$(echo "$children" | wc -l | tr -d ' ')
       echo "Children:       ${child_count} active"

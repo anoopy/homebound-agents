@@ -9,7 +9,6 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from datetime import datetime
 
 from homebound.config import HomeboundConfig
 from homebound.session import ChildInfo, extract_keywords, read_child_output
@@ -69,9 +68,8 @@ class RoutingEngine:
     # Helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _item_label(item_id: int) -> str:
-        return f"Claude{item_id}"
+    def _item_label(self, item_id: int) -> str:
+        return f"{self.config.sessions.agent_label}{item_id}"
 
     # ------------------------------------------------------------------
     # Thread routing
@@ -127,7 +125,7 @@ class RoutingEngine:
     def match_by_keywords(self, text: str) -> int | None:
         """Match incoming text against active session keywords.
 
-        Scoring: keyword overlap + issue ref bonus + recency bonus - idle penalty.
+        Scoring: keyword overlap count + issue ref bonus (5.0).
         Returns the item_id of the best-matching session, or None if no
         clear match (below threshold or ambiguous tie).
         """
@@ -142,10 +140,11 @@ class RoutingEngine:
         if not incoming_words and issue_ref_id is None:
             return None
 
+        logger.debug("Keyword routing: incoming=%s", incoming_words)
+
         best_id: int | None = None
         best_score: float = 0.0
         tied = False
-        now = datetime.now()
 
         for item_id, child in self.children.items():
             if child is None:
@@ -153,7 +152,8 @@ class RoutingEngine:
 
             # Base score: keyword overlap
             child_keywords = set(child.recent_keywords)
-            score: float = len(incoming_words & child_keywords) if child_keywords else 0.0
+            overlap = incoming_words & child_keywords if child_keywords else set()
+            score: float = float(len(overlap))
 
             # Issue reference bonus: strong signal when #N matches github_issue_id
             if issue_ref_id is not None and child.github_issue_id == issue_ref_id:
@@ -162,14 +162,8 @@ class RoutingEngine:
             if score == 0.0:
                 continue
 
-            # Recency bonus: sessions active in last 5 min get +1
-            age_seconds = (now - child.last_message_at).total_seconds()
-            if age_seconds < 300:
-                score += 1.0
-
-            # Idle penalty: sessions idle > 15 min get -0.5
-            if age_seconds > 900:
-                score -= 0.5
+            label = self._item_label(item_id)
+            logger.debug("  %s: overlap=%d score=%.1f", label, len(overlap), score)
 
             if score > best_score + 0.01:
                 best_score = score
@@ -177,6 +171,12 @@ class RoutingEngine:
                 tied = False
             elif abs(score - best_score) < 0.01 and score > 0:
                 tied = True
+
+        logger.debug(
+            "Keyword routing result: best=%s score=%.1f threshold=%d tied=%s",
+            self._item_label(best_id) if best_id is not None else "None",
+            best_score, threshold, tied,
+        )
 
         if best_score >= threshold and not tied:
             return best_id
@@ -215,6 +215,8 @@ class RoutingEngine:
         if not session_lines:
             return None
 
+        logger.debug("LLM routing: %d sessions, message=%s", len(session_lines), text[:100])
+
         # Build recent conversation context
         context_lines: list[str] = []
         for sender_label, msg_text in self._recent_messages[-5:]:
@@ -225,7 +227,7 @@ class RoutingEngine:
             "You are a strict message router. Given the recent conversation and active sessions, "
             "decide if the NEW message is a follow-up to an existing session.\n\n"
             "Rules:\n"
-            "- Respond with ONLY the session label (e.g. Claude1) if the new message clearly continues that session's topic\n"
+            f"- Respond with ONLY the session label (e.g. {self.config.sessions.agent_label}1) if the new message clearly continues that session's topic\n"
             "- Respond NONE if it is a new or unrelated topic\n"
             "- Respond NONE if unsure\n"
             "- Default to NONE — only match when confident\n\n"
@@ -247,8 +249,19 @@ class RoutingEngine:
             answer = response.content[0].text.strip().lower()
             answer = answer.strip(".*:- ")
             if re.search(r"\bnone\b", answer):
+                matched_id = None
+            else:
+                # Try exact match first, then extract first token
+                matched_id = id_map.get(answer)
+                if matched_id is None:
+                    label_lower = re.escape(self.config.sessions.agent_label.lower())
+                    first_token = re.match(rf"({label_lower}\d+)", answer)
+                    if first_token:
+                        matched_id = id_map.get(first_token.group(1))
+            logger.debug("LLM routing: answer=%r → item_id=%s", answer, matched_id)
+            if matched_id is None:
                 return None
-            return id_map.get(answer)
+            return matched_id
         except Exception as e:
             logger.warning("LLM routing failed: %s", e)
             return None

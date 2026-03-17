@@ -127,6 +127,7 @@ runtime:
   env_unset: {yaml_list(d.runtime.env_unset)}
 
 sessions:
+  agent_label: "{d.sessions.agent_label}"  # User-facing name: Agent1, Agent2 (or Claude, Bot, etc.)
   max_concurrent: {d.sessions.max_concurrent}
   idle_timeout: {d.sessions.idle_timeout}
   init_timeout: {d.sessions.init_timeout}

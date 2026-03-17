@@ -242,14 +242,15 @@ class AdminCommandHandler:
         """Post available admin commands."""
         aliases = [self.config.name] + self.config.orchestrator.aliases
         short = aliases[-1] if len(aliases) > 1 else aliases[0]
+        agent = self.config.sessions.agent_label
         await self._post(
             ":information_source: *Commands*\n\n"
             "*Sessions*\n"
             ">`<text>` — smart-routed to matching session or new slot\n"
-            ">`@Claude <task>` — spawn or route to next free slot\n"
-            ">`@Claude1 <task>` — route to specific slot (any number)\n"
-            ">`@Claude1 close` — close session\n"
-            ">`Claude1 ans <value>` — answer runtime prompt\n\n"
+            f">`@{agent} <task>` — spawn or route to next free slot\n"
+            f">`@{agent}1 <task>` — route to specific slot (any number)\n"
+            f">`@{agent}1 close` — close session\n"
+            f">`{agent}1 ans <value>` — answer runtime prompt\n\n"
             "*Admin*\n"
             f">`status` or `@{short} status` — list sessions\n"
             f">`help` or `@{short} help` — this help\n"

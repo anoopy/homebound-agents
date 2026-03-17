@@ -26,7 +26,7 @@ from homebound.tmux import (
 
 logger = logging.getLogger("homebound.session")
 
-SLOT_WINDOW_PREFIX = "CLAUDE-"
+_LEGACY_WINDOW_PREFIX = "CLAUDE-"  # For backward-compat adoption of old windows
 
 
 @dataclass
@@ -34,7 +34,7 @@ class ChildInfo:
     """Tracks a running child agent session."""
 
     item_id: int  # Slot number (1..max_concurrent) in unified pool
-    window_name: str  # e.g. "CLAUDE-1"
+    window_name: str  # e.g. "AGENT-1"
     started_at: datetime = field(default_factory=datetime.now)
     last_message_at: datetime = field(default_factory=datetime.now)
     idle_warnings: int = 0
@@ -50,33 +50,37 @@ class ChildInfo:
         return (datetime.now() - self.last_message_at).total_seconds() > timeout
 
 
-def window_name(item_id: int) -> str:
+def window_name(config: HomeboundConfig, item_id: int) -> str:
     """Generate tmux window name for a slot."""
-    return f"{SLOT_WINDOW_PREFIX}{item_id}"
+    return f"{config.sessions.window_prefix}{item_id}"
 
 
-def parse_window_name(wname: str) -> int | None:
+def parse_window_name(wname: str, config: HomeboundConfig) -> int | None:
     """Parse a slot number from a tmux window name. Returns None if not matching."""
-    if wname.upper().startswith(SLOT_WINDOW_PREFIX):
-        slot_text = wname[len(SLOT_WINDOW_PREFIX):]
-        try:
-            slot = int(slot_text)
-        except ValueError:
-            return None
-        if slot < 1:
-            return None
-        return slot
+    prefixes = [config.sessions.window_prefix]
+    if _LEGACY_WINDOW_PREFIX != config.sessions.window_prefix:
+        prefixes.append(_LEGACY_WINDOW_PREFIX)
+    for prefix in prefixes:
+        if wname.upper().startswith(prefix):
+            slot_text = wname[len(prefix):]
+            try:
+                slot = int(slot_text)
+            except ValueError:
+                continue
+            if slot < 1:
+                continue
+            return slot
     return None
 
 
 def session_name(config: HomeboundConfig, item_id: int) -> str:
     """Generate child agent name for transport identity."""
-    return f"claude-{item_id}"
+    return f"{config.sessions.session_prefix}{item_id}"
 
 
 def _item_label(config: HomeboundConfig, item_id: int) -> str:
     """Format a user-facing item label."""
-    return f"Claude{item_id}"
+    return f"{config.sessions.agent_label}{item_id}"
 
 
 _STOPWORDS = frozenset({
@@ -121,7 +125,7 @@ def _sanitize_text(
     clean = " ".join(text.splitlines())
     if len(clean) > max_len:
         if label:
-            display_label = item_label or f"Claude{item_id}"
+            display_label = item_label or f"Session{item_id}"
             logger.warning(
                 "%s: %s truncated from %d to %d chars",
                 display_label, label, len(clean), max_len,
@@ -160,7 +164,7 @@ async def spawn_child(
     project_dir = config.project_dir
     label = _item_label(config, item_id)
 
-    wname = window_name(item_id)
+    wname = window_name(config, item_id)
     target = f"{tmux_session}:{wname}"
 
     # Create new tmux window
@@ -227,7 +231,7 @@ def _build_prompt(
         label="task_text", item_id=item_id, item_label=_item_label(config, item_id),
     )
 
-    team_name = f"claude-{item_id}"
+    team_name = session_name(config, item_id)
 
     prompt = mode_config.prompt_template.format(
         team_name=team_name,
@@ -238,6 +242,17 @@ def _build_prompt(
         session_name=sid,
         name=config.name,
     )
+
+    # Append standard progress-reporting instruction to all modes
+    progress_suffix = (
+        " PROGRESS UPDATES (mandatory): "
+        "The user cannot see your terminal. Slack is your only communication channel. "
+        "Post a brief progress update to Slack after each meaningful step "
+        "(e.g. analysis done, implementation started, tests passing). "
+        "Do not wait until the end — post as you go. "
+        f"Slack command: {post_command}"
+    )
+    prompt += progress_suffix
 
     return prompt
 
@@ -322,7 +337,7 @@ async def adopt_child(
         config: Homebound configuration.
         known_windows: Pre-fetched window list to avoid redundant tmux calls.
     """
-    wname = window_name(item_id)
+    wname = window_name(config, item_id)
 
     if known_windows is not None:
         windows = known_windows

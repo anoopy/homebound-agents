@@ -66,7 +66,7 @@ class TestThreadRouting:
 
     def test_route_by_thread_matches(self):
         orch = self._make_orchestrator()
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         orch.children[42] = child
         orch._router._message_session_map["1234.5678"] = 42
 
@@ -83,7 +83,7 @@ class TestThreadRouting:
         """A message that starts a thread (thread_ts == ts) shouldn't be treated as a reply."""
         orch = self._make_orchestrator()
         orch._router._message_session_map["1234.5678"] = 42
-        orch.children[42] = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        orch.children[42] = ChildInfo(item_id=42, window_name="AGENT-42")
 
         msg = IncomingMessage(text="hello", ts="1234.5678", thread_ts="1234.5678")
         assert orch._router.route_by_thread(msg) is None
@@ -114,7 +114,7 @@ class TestThreadRouting:
     def test_thread_routing_disabled(self):
         orch = self._make_orchestrator(thread_routing=False)
         orch._router._message_session_map["1234.5678"] = 42
-        orch.children[42] = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        orch.children[42] = ChildInfo(item_id=42, window_name="AGENT-42")
 
         msg = IncomingMessage(text="reply", ts="1234.9999", thread_ts="1234.5678")
         # Even though _route_by_thread would match, the config flag prevents use
@@ -139,9 +139,9 @@ class TestKeywordRouting:
 
     def test_match_clear_winner(self):
         orch = self._make_orchestrator(keyword_match_threshold=2)
-        child1 = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child1 = ChildInfo(item_id=42, window_name="AGENT-42")
         child1.recent_keywords = ["login", "authentication", "password", "oauth"]
-        child2 = ChildInfo(item_id=99, window_name="CLAUDE-99")
+        child2 = ChildInfo(item_id=99, window_name="AGENT-99")
         child2.recent_keywords = ["database", "migration", "schema", "postgres"]
 
         orch.children[42] = child1
@@ -152,34 +152,29 @@ class TestKeywordRouting:
 
     def test_no_match_below_threshold(self):
         orch = self._make_orchestrator(keyword_match_threshold=2)
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         child.recent_keywords = ["login", "authentication", "password"]
-        # Set last_message_at to >5 min ago to avoid recency bonus
-        child.last_message_at = datetime.now() - timedelta(minutes=10)
         orch.children[42] = child
 
-        # Only 1 keyword match (score=1.0), no recency bonus, threshold is 2
+        # Only 1 keyword match (score=1.0), threshold is 2
         assert orch._router.match_by_keywords("check the login page") is None
 
     def test_tie_returns_none(self):
         orch = self._make_orchestrator(keyword_match_threshold=2)
-        now = datetime.now()
-        child1 = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child1 = ChildInfo(item_id=42, window_name="AGENT-42")
         child1.recent_keywords = ["api", "endpoint", "auth"]
-        child1.last_message_at = now  # same recency for both
-        child2 = ChildInfo(item_id=99, window_name="CLAUDE-99")
+        child2 = ChildInfo(item_id=99, window_name="AGENT-99")
         child2.recent_keywords = ["api", "endpoint", "database"]
-        child2.last_message_at = now  # same recency for both
 
         orch.children[42] = child1
         orch.children[99] = child2
 
-        # "api endpoint" matches both equally (2 keywords + same recency bonus)
+        # "api endpoint" matches both equally (2 keywords each)
         assert orch._router.match_by_keywords("fix the api endpoint") is None
 
     def test_empty_text(self):
         orch = self._make_orchestrator()
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         child.recent_keywords = ["login"]
         orch.children[42] = child
 
@@ -191,7 +186,7 @@ class TestKeywordRouting:
 
     def test_child_with_no_keywords(self):
         orch = self._make_orchestrator(keyword_match_threshold=2)
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         child.recent_keywords = []
         orch.children[42] = child
 
@@ -220,7 +215,7 @@ class TestIssueRefRouting:
 
     def test_issue_ref_routes_to_matching_session(self):
         orch = self._make_orchestrator(keyword_match_threshold=2)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.github_issue_id = 42
         child.recent_keywords = ["auth"]
         orch.children[1] = child
@@ -230,7 +225,7 @@ class TestIssueRefRouting:
 
     def test_issue_ref_no_match(self):
         orch = self._make_orchestrator(keyword_match_threshold=2)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.github_issue_id = 42
         child.recent_keywords = ["auth"]
         orch.children[1] = child
@@ -241,10 +236,10 @@ class TestIssueRefRouting:
     def test_issue_ref_overrides_keyword_match(self):
         """Issue ref bonus should dominate keyword-only matches."""
         orch = self._make_orchestrator(keyword_match_threshold=2)
-        child1 = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child1 = ChildInfo(item_id=1, window_name="AGENT-1")
         child1.github_issue_id = 42
         child1.recent_keywords = ["auth"]
-        child2 = ChildInfo(item_id=2, window_name="CLAUDE-2")
+        child2 = ChildInfo(item_id=2, window_name="AGENT-2")
         child2.recent_keywords = ["deploy", "database", "migration"]
 
         orch.children[1] = child1
@@ -256,7 +251,7 @@ class TestIssueRefRouting:
     def test_issue_ref_with_no_keywords_still_routes(self):
         """A bare #N with no other keywords should still route via issue ref."""
         orch = self._make_orchestrator(keyword_match_threshold=2)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.github_issue_id = 42
         child.recent_keywords = ["something"]
         orch.children[1] = child
@@ -265,7 +260,7 @@ class TestIssueRefRouting:
 
 
 # ---------------------------------------------------------------------------
-# Advanced keyword scoring (recency bonus, idle penalty)
+# Keyword scoring (pure overlap, no recency/idle adjustments)
 # ---------------------------------------------------------------------------
 
 class TestKeywordScoring:
@@ -278,65 +273,47 @@ class TestKeywordScoring:
         orch = Orchestrator(config, dry_run=True)
         return orch
 
-    def test_recency_bonus_breaks_tie(self):
-        """Active session wins over stale session when keyword overlap is equal."""
-        orch = self._make_orchestrator(keyword_match_threshold=2)
+    def test_keyword_threshold_1_matches_single_overlap(self):
+        """With threshold=1 (default), a single keyword overlap should match."""
+        orch = self._make_orchestrator(keyword_match_threshold=1)
+
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["sectors", "fii", "dii", "fmcg", "banks", "auto"]
+
+        orch.children[1] = child
+
+        # Only 1 keyword overlap ("sectors"), threshold=1 → match
+        assert orch._router.match_by_keywords("which sectors in india have better prospects") == 1
+
+    def test_keyword_scoring_ignores_recency(self):
+        """Idle sessions should still match purely on keyword overlap."""
+        orch = self._make_orchestrator(keyword_match_threshold=1)
         now = datetime.now()
 
-        child1 = ChildInfo(item_id=1, window_name="CLAUDE-1")
-        child1.recent_keywords = ["api", "endpoint", "auth"]
-        child1.last_message_at = now  # active
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["sectors", "india", "economy"]
+        child.last_message_at = now - timedelta(minutes=30)  # idle for 30 min
 
-        child2 = ChildInfo(item_id=2, window_name="CLAUDE-2")
-        child2.recent_keywords = ["api", "endpoint", "database"]
-        child2.last_message_at = now - timedelta(minutes=10)  # stale
+        orch.children[1] = child
 
-        orch.children[1] = child1
-        orch.children[2] = child2
+        # Even though session is idle, keyword match should still work
+        assert orch._router.match_by_keywords("india economy outlook") == 1
 
-        # Both match "api endpoint" equally (2 keywords each),
-        # but child1 gets recency bonus (+1) → child1 wins
-        assert orch._router.match_by_keywords("fix the api endpoint") == 1
+    def test_more_overlap_wins(self):
+        """Session with more keyword overlap wins."""
+        orch = self._make_orchestrator(keyword_match_threshold=1)
 
-    def test_idle_penalty_deprioritizes(self):
-        """Sessions idle >15 min should score lower."""
-        orch = self._make_orchestrator(keyword_match_threshold=2)
-        now = datetime.now()
-
-        child1 = ChildInfo(item_id=1, window_name="CLAUDE-1")
-        child1.recent_keywords = ["login", "authentication"]
-        child1.last_message_at = now - timedelta(minutes=20)  # idle > 15min
-
-        child2 = ChildInfo(item_id=2, window_name="CLAUDE-2")
-        child2.recent_keywords = ["login", "authentication"]
-        child2.last_message_at = now - timedelta(minutes=8)  # not idle, not recent
-
-        orch.children[1] = child1
-        orch.children[2] = child2
-
-        # Both match equally on keywords (2 each).
-        # child1 gets idle penalty (-0.5), child2 doesn't → child2 wins
-        assert orch._router.match_by_keywords("login authentication problem") == 2
-
-    def test_recency_bonus_not_applied_beyond_5_min(self):
-        """Sessions >5min old don't get recency bonus."""
-        orch = self._make_orchestrator(keyword_match_threshold=2)
-        now = datetime.now()
-
-        child1 = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child1 = ChildInfo(item_id=1, window_name="AGENT-1")
         child1.recent_keywords = ["login", "auth", "password"]
-        child1.last_message_at = now - timedelta(minutes=6)  # > 5 min
 
-        child2 = ChildInfo(item_id=2, window_name="CLAUDE-2")
-        child2.recent_keywords = ["login", "auth"]
-        child2.last_message_at = now  # active
+        child2 = ChildInfo(item_id=2, window_name="AGENT-2")
+        child2.recent_keywords = ["login"]
 
         orch.children[1] = child1
         orch.children[2] = child2
 
-        # child1 has 3 keyword matches, child2 has 2 keyword matches + 1 recency bonus
-        # child1: 3.0, child2: 2.0 + 1.0 = 3.0 → tie → None
-        assert orch._router.match_by_keywords("login auth password reset") is None
+        # child1 has 2 overlaps (login, auth), child2 has 1 (login)
+        assert orch._router.match_by_keywords("fix login auth") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +333,7 @@ class TestGithubIssueIdPersistence:
 
     def test_github_issue_id_round_trip(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.github_issue_id = 42
         child.topic_summary = "Fix auth"
         child.recent_keywords = ["auth"]
@@ -371,7 +348,7 @@ class TestGithubIssueIdPersistence:
 
     def test_github_issue_id_none_round_trip(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         # github_issue_id defaults to None
         child.topic_summary = "General task"
         child.recent_keywords = ["task"]
@@ -401,7 +378,7 @@ class TestKeywordEnrichment:
 
     def test_enrich_updates_keywords(self):
         orch = self._make_orchestrator(enrich_interval_cycles=1)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.recent_keywords = ["original"]
         orch.children[1] = child
 
@@ -418,7 +395,7 @@ class TestKeywordEnrichment:
 
     def test_enrich_cycle_gating(self):
         orch = self._make_orchestrator(enrich_interval_cycles=3)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.recent_keywords = ["original"]
         orch.children[1] = child
 
@@ -437,7 +414,7 @@ class TestKeywordEnrichment:
 
     def test_enrich_caps_keywords_at_40(self):
         orch = self._make_orchestrator(enrich_interval_cycles=1)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.recent_keywords = [f"existing{i}" for i in range(30)]
         orch.children[1] = child
 
@@ -449,7 +426,7 @@ class TestKeywordEnrichment:
 
     def test_enrich_skips_empty_output(self):
         orch = self._make_orchestrator(enrich_interval_cycles=1)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.recent_keywords = ["original"]
         orch.children[1] = child
 
@@ -469,7 +446,7 @@ class TestKeywordEnrichment:
 
     def test_enrich_disabled_when_interval_zero(self):
         orch = self._make_orchestrator(enrich_interval_cycles=0)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         child.recent_keywords = ["original"]
         orch.children[1] = child
 
@@ -494,7 +471,7 @@ class TestMessageSessionMap:
 
     def test_record_outgoing_message(self):
         orch = self._make_orchestrator()
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         orch.children[42] = child
 
         orch._router.record_outgoing_message("1234.5678", 42)
@@ -512,7 +489,7 @@ class TestMessageSessionMap:
 
     def test_prune_child_posted_ts(self):
         orch = self._make_orchestrator()
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         orch.children[42] = child
 
         for i in range(60):
@@ -522,19 +499,19 @@ class TestMessageSessionMap:
 
     def test_agent_startup_signal_records_ts(self):
         orch = self._make_orchestrator()
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         orch.children[42] = child
 
-        orch._record_agent_startup_signal("[claude-42] Working on issue...", ts="1234.5678")
+        orch._record_agent_startup_signal("[agent-42] Working on issue...", ts="1234.5678")
         assert orch._router._message_session_map.get("1234.5678") == 42
 
     def test_agent_startup_signal_no_ts(self):
         orch = self._make_orchestrator()
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         orch.children[42] = child
 
         # Without ts, should not add to map
-        orch._record_agent_startup_signal("[claude-42] Working on issue...")
+        orch._record_agent_startup_signal("[agent-42] Working on issue...")
         assert len(orch._router._message_session_map) == 0
 
 
@@ -560,19 +537,19 @@ class TestAutoSpawn:
 
     def test_with_occupied_slots(self):
         orch = self._make_orchestrator()
-        orch.children[1] = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        orch.children[1] = ChildInfo(item_id=1, window_name="AGENT-1")
         assert orch._router.next_free_slot() == 2
 
     def test_all_slots_occupied(self):
         orch = self._make_orchestrator(max_concurrent=2)
-        orch.children[1] = ChildInfo(item_id=1, window_name="CLAUDE-1")
-        orch.children[2] = ChildInfo(item_id=2, window_name="CLAUDE-2")
+        orch.children[1] = ChildInfo(item_id=1, window_name="AGENT-1")
+        orch.children[2] = ChildInfo(item_id=2, window_name="AGENT-2")
         assert orch._router.next_free_slot() is None
 
     def test_mixed_slots(self):
         orch = self._make_orchestrator()
-        orch.children[1] = ChildInfo(item_id=1, window_name="CLAUDE-1")
-        orch.children[3] = ChildInfo(item_id=3, window_name="CLAUDE-3")
+        orch.children[1] = ChildInfo(item_id=1, window_name="AGENT-1")
+        orch.children[3] = ChildInfo(item_id=3, window_name="AGENT-3")
         assert orch._router.next_free_slot() == 2
 
 
@@ -593,7 +570,7 @@ class TestStatePersistence:
 
     def test_save_and_load_round_trip(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         child.topic_summary = "Fix login bug"
         child.recent_keywords = ["login", "bug", "fix"]
         child.posted_message_ts = ["1234.5678", "1234.9999"]
@@ -624,7 +601,7 @@ class TestRoutingConfig:
         assert config.keyword_routing is True
         assert config.llm_routing is False
         assert config.auto_spawn_on_no_match is True
-        assert config.keyword_match_threshold == 2
+        assert config.keyword_match_threshold == 1
         assert config.max_message_map_size == 200
 
     def test_from_yaml(self):
@@ -682,7 +659,7 @@ class TestActiveThreadParents:
 
     def test_returns_ts_for_active_session(self):
         orch = self._make_orchestrator(thread_routing=True, thread_poll_max_age=1800)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         orch.children[1] = child
         # Use a recent ts (now)
         recent_ts = str(time.time())
@@ -711,7 +688,7 @@ class TestActiveThreadParents:
 
     def test_excludes_old_threads(self):
         orch = self._make_orchestrator(thread_routing=True, thread_poll_max_age=1800)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         orch.children[1] = child
         # ts older than max_age (31 minutes ago)
         old_ts = str(time.time() - 1860)
@@ -724,7 +701,7 @@ class TestActiveThreadParents:
         orch = self._make_orchestrator(
             thread_routing=True, thread_poll_max_age=1800, thread_poll_max_threads=3,
         )
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         orch.children[1] = child
         now = time.time()
         for i in range(10):
@@ -736,7 +713,7 @@ class TestActiveThreadParents:
 
     def test_empty_when_thread_routing_disabled(self):
         orch = self._make_orchestrator(thread_routing=False, thread_poll_max_age=1800)
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         orch.children[1] = child
         recent_ts = str(time.time())
         orch._router._message_session_map[recent_ts] = 1
@@ -748,7 +725,7 @@ class TestActiveThreadParents:
         orch = self._make_orchestrator(
             thread_routing=True, thread_poll_max_age=1800, thread_poll_max_threads=2,
         )
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
         orch.children[1] = child
         now = time.time()
         oldest_ts = str(now - 100)
@@ -789,7 +766,7 @@ class TestThreadTsPassthrough:
                 post_command_template="post --session {session_name} --thread {thread_ts} --msg {message}",
             ),
         )
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
 
         asyncio.run(send_to_child(child, "hello", config, thread_ts="1111.2222"))
 
@@ -806,7 +783,7 @@ class TestThreadTsPassthrough:
                 post_command_template="post --session {session_name} --thread {thread_ts} --msg {message}",
             ),
         )
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
 
         asyncio.run(send_to_child(child, "hello", config))
 
@@ -823,12 +800,12 @@ class TestThreadTsPassthrough:
                 post_command_template="post --session {session_name} --msg {message}",
             ),
         )
-        child = ChildInfo(item_id=1, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
 
         asyncio.run(send_to_child(child, "hello", config, thread_ts="1111.2222"))
 
         _, sent = mock_tmux.call_args.args
-        assert "--session claude-1" in sent
+        assert "--session agent-1" in sent
         # No error even though thread_ts was passed but not in template
 
     def test_build_prompt_handles_thread_ts_placeholder(self):
@@ -850,12 +827,164 @@ class TestThreadTsPassthrough:
         # Should not raise KeyError
         prompt = _build_prompt(1, "some task", "chat", config)
         assert "--thread " in prompt  # empty thread_ts at spawn time
-        assert "--session claude-1" in prompt
+        assert "--session agent-1" in prompt
 
     def test_thread_routed_message_sets_active_thread_ts(self):
         """Tier 1 routing should set child.active_thread_ts."""
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42")
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
         assert child.active_thread_ts == ""
 
         child.active_thread_ts = "1234.5678"
         assert child.active_thread_ts == "1234.5678"
+
+
+# ---------------------------------------------------------------------------
+# Thread routing denial blocks fallthrough
+# ---------------------------------------------------------------------------
+
+class TestThreadRoutingDenialBlocks:
+    """Tier 1 security denial should NOT fall through to keyword/LLM routing."""
+
+    def test_thread_denial_does_not_fall_through_to_keyword(self):
+        """When thread routing matches but security denies, message must not
+        reach keyword routing (Tier 2)."""
+        from homebound.orchestrator import Orchestrator
+
+        config = HomeboundConfig(
+            security=SecurityConfig(allowed_users=["WOWNER"], allow_open_channel=False),
+            routing=RoutingConfig(keyword_match_threshold=1),
+        )
+        orch = Orchestrator(config=config, dry_run=True)
+        orch._post = AsyncMock()
+        orch.startup_ts = 0.0
+
+        # Session owned by WOWNER
+        child = ChildInfo(item_id=1, window_name="AGENT-1", owner_user_id="WOWNER")
+        child.recent_keywords = ["auth", "login", "password"]
+        orch.children[1] = child
+
+        # Map a thread parent to this session
+        orch._router._message_session_map["1000.0000"] = 1
+
+        # Alice (WALICE) is NOT in allowed_users but IS the sender.
+        # Re-init the policy so it recognises the restricted list.
+        orch.command_policy = orch.command_policy.__class__(config.security)
+
+        future_ts = str(time.time() + 1000)
+
+        with patch("homebound.orchestrator.send_to_child", new_callable=AsyncMock) as mock_send:
+            mock_transport = MagicMock()
+            mock_transport.poll = MagicMock(return_value=[
+                IncomingMessage(
+                    text="auth login password",  # would match keywords
+                    ts=future_ts,
+                    user="WALICE",
+                    thread_ts="1000.0000",  # thread reply → Tier 1 match
+                ),
+            ])
+            mock_transport.is_from_agent = MagicMock(return_value=False)
+            mock_transport.poll_thread_replies = MagicMock(return_value=[])
+            orch._transport = mock_transport
+
+            asyncio.run(orch._poll_cycle())
+
+            # send_to_child must NOT have been called — neither via thread
+            # nor via keyword fallthrough.
+            mock_send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# LLM response parsing — first-token fallback
+# ---------------------------------------------------------------------------
+
+class TestLLMResponseParsing:
+    """Verify that verbose LLM answers are parsed via first-token fallback."""
+
+    def _make_orchestrator(self, **routing_kwargs):
+        config = HomeboundConfig(
+            security=SecurityConfig(allow_open_channel=True),
+            routing=RoutingConfig(llm_routing=True, **routing_kwargs),
+        )
+        from homebound.orchestrator import Orchestrator
+        orch = Orchestrator(config, dry_run=True)
+        return orch
+
+    def _mock_llm_response(self, text: str):
+        """Create a mock Anthropic response with the given text."""
+        content_block = MagicMock()
+        content_block.text = text
+        response = MagicMock()
+        response.content = [content_block]
+        return response
+
+    def test_exact_match(self):
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["auth"]
+        orch.children[1] = child
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = self._mock_llm_response("Agent1")
+        orch._router._anthropic_client = mock_client
+
+        result = asyncio.run(orch._router.match_by_llm("test"))
+        assert result == 1
+
+    def test_verbose_response_extracts_first_token(self):
+        """LLM returns 'Agent1 — it matches the auth topic', should still match."""
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["auth"]
+        orch.children[1] = child
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = self._mock_llm_response(
+            "Agent1 — it matches the auth topic"
+        )
+        orch._router._anthropic_client = mock_client
+
+        result = asyncio.run(orch._router.match_by_llm("test"))
+        assert result == 1
+
+    def test_none_response(self):
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["auth"]
+        orch.children[1] = child
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = self._mock_llm_response("NONE")
+        orch._router._anthropic_client = mock_client
+
+        result = asyncio.run(orch._router.match_by_llm("test"))
+        assert result is None
+
+    def test_verbose_none_response(self):
+        """LLM says 'None of the sessions match' — should still return None."""
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["auth"]
+        orch.children[1] = child
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = self._mock_llm_response(
+            "None of the sessions match this query"
+        )
+        orch._router._anthropic_client = mock_client
+
+        result = asyncio.run(orch._router.match_by_llm("test"))
+        assert result is None
+
+    def test_unknown_label_returns_none(self):
+        """LLM returns a label that doesn't exist in id_map."""
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["auth"]
+        orch.children[1] = child
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = self._mock_llm_response("Agent99")
+        orch._router._anthropic_client = mock_client
+
+        result = asyncio.run(orch._router.match_by_llm("test"))
+        assert result is None

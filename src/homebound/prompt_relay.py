@@ -47,7 +47,7 @@ class PromptRelayManager:
     command_policy:
         Security policy for evaluating prompt-answer permissions.
     item_label_fn:
-        Callable(item_id) -> str for formatting item labels (e.g. "Claude1").
+        Callable(item_id) -> str for formatting item labels (e.g. "Agent1").
     post_fn:
         Async callable(message) -> str to post messages to the transport.
     normalize_fn:
@@ -344,30 +344,3 @@ class PromptRelayManager:
         await self._post_fn(f":white_check_mark: *{label}*: Prompt answer relayed to session.")
         return True
 
-    async def maybe_handle_implicit_prompt_answer(self, text: str, principal: Principal) -> bool:
-        if not self.config.prompt_relay.enabled:
-            return False
-        if not text.strip():
-            return False
-
-        active_prompts = self.all_active_prompts()
-        if not active_prompts:
-            return False
-
-        decision = self.command_policy.evaluate(CommandAction.PROMPT_ANSWER, principal)
-        if not decision.allow:
-            return False
-
-        if len(active_prompts) > 1:
-            await self._post_fn(
-                "Multiple pending runtime prompts. "
-                "Use explicit syntax: `<N> ans <value>`."
-            )
-            return True
-        prompt = active_prompts[0]
-        return await self.handle_prompt_answer(
-            prompt.item_id,
-            text,
-            principal,
-            announce_denied=True,
-        )

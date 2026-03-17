@@ -64,6 +64,7 @@ class Orchestrator:
         self.seen_ts: set[str] = set()
         self.shutting_down = False
         self.startup_ts: float = time.time()
+        self._last_poll_ts: float = self.startup_ts
 
         # Lazy-init transport and tracker
         self._transport: Transport | None = None
@@ -108,6 +109,7 @@ class Orchestrator:
             strip_client_signature_fn=self._strip_client_signature,
             principal_from_fields_fn=self._principal_from_fields,
         )
+        self._spawn_tasks: set[asyncio.Task] = set()
         self._consecutive_poll_failures: int = 0
         self._outage_start_time: float | None = None
 
@@ -219,11 +221,11 @@ class Orchestrator:
         return " ".join(command_text.strip().lower().split())
 
     def _item_label(self, item_id: int) -> str:
-        return f"Claude{item_id}"
+        return f"{self.config.sessions.agent_label}{item_id}"
 
     def _resolve_label_to_item_id(self, label: str) -> int | None:
-        """Resolve a user-facing label (Claude1, Claude 1, or raw int) to a slot number."""
-        dev_match = re.fullmatch(r"(?:claude)\s*(\d+)", label.strip(), re.IGNORECASE)
+        """Resolve a user-facing label (e.g. Agent1, Agent 1, or raw int) to a slot number."""
+        dev_match = re.fullmatch(rf"(?:{re.escape(self.config.sessions.agent_label)})\s*(\d+)", label.strip(), re.IGNORECASE)
         if dev_match:
             return int(dev_match.group(1))
         try:
@@ -234,9 +236,8 @@ class Orchestrator:
     def _status_hint(self, item_id: int) -> str:
         return f"Use `@{self.config.name} status` to inspect progress."
 
-    @staticmethod
-    def _parse_role_command(text: str) -> tuple[str, int | None, str] | None:
-        match = re.match(r"^@(claude)\s*(\d+)?\s+(.+)$", text.strip(), re.IGNORECASE)
+    def _parse_role_command(self, text: str) -> tuple[str, int | None, str] | None:
+        match = re.match(rf"^@({re.escape(self.config.sessions.agent_label)})\s*(\d+)?\s+(.+)$", text.strip(), re.IGNORECASE)
         if not match:
             return None
         role = match.group(1).lower()
@@ -295,7 +296,8 @@ class Orchestrator:
         logger.info("%s: startup signal observed from %s", self._item_label(item_id), source)
 
     def _extract_item_id_from_agent_message(self, text: str) -> int | None:
-        dev_match = re.search(r"\[claude-?(\d+)\b", text, re.IGNORECASE)
+        prefix = re.escape(self.config.sessions.session_prefix.rstrip("-"))
+        dev_match = re.search(rf"\[{prefix}-?(\d+)\b", text, re.IGNORECASE)
         if dev_match:
             return int(dev_match.group(1))
         return None
@@ -513,7 +515,7 @@ class Orchestrator:
         self._poll_cycles += 1
         self._prompt_relay.expire_pending_prompts()
         lookback = self.config.transport.lookback_minutes
-        since_ts = time.time() - (lookback * 60)
+        since_ts = min(self._last_poll_ts, time.time() - (lookback * 60))
         poll_limit = self.config.transport.poll_limit
 
         transport_ok = False
@@ -540,6 +542,8 @@ class Orchestrator:
                 logger.error("Thread reply poll failed: %s", e)
 
         await self._update_transport_health(transport_ok)
+        if transport_ok:
+            self._last_poll_ts = time.time()
 
         for msg in messages:
             ts = msg.ts
@@ -602,7 +606,7 @@ class Orchestrator:
                 continue
 
             prompt_answer_match = re.search(
-                r"^((?:claude)?\s*\d+)\s+ans\s+(.+)$", stripped, re.IGNORECASE,
+                rf"^((?:{re.escape(self.config.sessions.agent_label)})?\s*\d+)\s+ans\s+(.+)$", stripped, re.IGNORECASE,
             )
             if prompt_answer_match:
                 resolved = self._resolve_label_to_item_id(prompt_answer_match.group(1))
@@ -615,36 +619,27 @@ class Orchestrator:
                     )
                     continue
 
-            # @Claude command handling
+            # @<agent_label> command handling
             role_command = self._parse_role_command(stripped)
             if role_command:
                 role, slot, payload = role_command
                 if slot is not None:
-                    # @Claude1 <task> — route to specific slot
+                    # @Agent1 <task> — route to specific slot
                     if slot < 1 or slot > self.max_children:
                         await self._post(f"Slot must be between 1 and {self.max_children}.")
                         continue
-                    item_id = slot
-                    task_text = payload
+                    await self._handle_issue_message(
+                        slot, payload, sender_user_id=sender_id, sender_extra=msg.extra,
+                    )
+                    continue
                 else:
-                    # @Claude <task> — find next free slot
-                    free_slot = self._router.next_free_slot()
-                    if free_slot is None:
-                        await self._post(
-                            f":no_entry_sign: At capacity (`{len(self.children)}/{self.max_children}`). "
-                            f"Please resend when a slot opens."
-                        )
-                        continue
-                    item_id = free_slot
-                    task_text = payload
-                await self._handle_issue_message(
-                    item_id, task_text, sender_user_id=sender_id, sender_extra=msg.extra,
-                )
-                continue
+                    # @Agent <task> — use stripped payload, fall through to Tier 2-4 cascade
+                    stripped = payload
 
-            bare_role_match = re.match(r"^@(claude)\s*\d*$", stripped, re.IGNORECASE)
+            bare_role_match = re.match(rf"^@({re.escape(self.config.sessions.agent_label)})\s*\d*$", stripped, re.IGNORECASE)
             if bare_role_match:
-                await self._post("Usage: `@Claude <task>` or `@Claude1 <task>` to target a specific slot.")
+                al = self.config.sessions.agent_label
+                await self._post(f"Usage: `@{al} <task>` or `@{al}1 <task>` to target a specific slot.")
                 continue
 
             if not stripped:
@@ -655,10 +650,6 @@ class Orchestrator:
                 await self._admin.handle_admin_query(
                     stripped, sender_user_id=sender_id, sender_extra=msg.extra,
                 )
-                continue
-
-            handled_implicit = await self._prompt_relay.maybe_handle_implicit_prompt_answer(stripped, principal)
-            if handled_implicit:
                 continue
 
             # --- Smart routing cascade ---
@@ -686,6 +677,10 @@ class Orchestrator:
                         )
                         logger.info("Thread-routed message to %s", label)
                         continue
+                    else:
+                        label = self._item_label(thread_item_id)
+                        logger.debug("Thread route to %s denied for %s", label, sender_id)
+                        continue  # Block — don't fall through to keyword/LLM
 
             # Tier 2: Keyword-based matching
             if self.config.routing.keyword_routing and self.children:
@@ -706,6 +701,9 @@ class Orchestrator:
                         )
                         logger.info("Keyword-routed message to %s", label)
                         continue
+                    else:
+                        label = self._item_label(kw_item_id)
+                        logger.debug("Keyword route to %s denied for %s", label, sender_id)
 
             # Tier 3: LLM-based matching
             if self.config.routing.llm_routing and self.children:
@@ -726,6 +724,9 @@ class Orchestrator:
                         )
                         logger.info("LLM-routed message to %s", label)
                         continue
+                    else:
+                        label = self._item_label(llm_item_id)
+                        logger.debug("LLM route to %s denied for %s", label, sender_id)
 
             # Tier 4: Auto-spawn new session for unmatched messages
             if self.config.routing.auto_spawn_on_no_match:
@@ -846,25 +847,48 @@ class Orchestrator:
 
             # Reserve slot with sentinel
             self.children[item_id] = None
-            try:
-                child = await spawn_child(
-                    item_id, task_text, config=self.config, mode=mode,
-                )
-                child.owner_user_id = sender_user_id
-                child.topic_summary = task_text[:200]
-                child.recent_keywords = extract_keywords(task_text)
-                issue_match = re.search(r"#(\d+)\b", task_text)
-                if issue_match:
-                    child.github_issue_id = int(issue_match.group(1))
-                self.children[item_id] = child
-                await self._register_startup_watch(item_id, child, mode)
-                self._save_children_state()
-                await self._post(f":rocket: *{label}*: New session started (`{mode}`)", item_id=item_id)
-                logger.info("Spawned child for %s (mode=%s)", label, mode)
-            except Exception as e:
-                self._cleanup_session(item_id)
-                await self._post(f":rotating_light: *{label}*: Failed to spawn session — `{e}`")
-                logger.error("Failed to spawn for %s: %s", label, e, exc_info=True)
+            task = asyncio.create_task(
+                self._do_spawn(item_id, task_text, mode, sender_user_id, label),
+                name=f"spawn-{item_id}",
+            )
+            self._spawn_tasks.add(task)
+            task.add_done_callback(self._on_spawn_done)
+            logger.info("Spawn task created for %s (mode=%s)", label, mode)
+
+    async def _do_spawn(
+        self, item_id: int, task_text: str, mode: str,
+        sender_user_id: str, label: str,
+    ) -> None:
+        """Background task: spawn child session. Sentinel already set by caller."""
+        try:
+            child = await spawn_child(
+                item_id, task_text, config=self.config, mode=mode,
+            )
+            child.owner_user_id = sender_user_id
+            child.topic_summary = task_text[:200]
+            child.recent_keywords = extract_keywords(task_text)
+            issue_match = re.search(r"#(\d+)\b", task_text)
+            if issue_match:
+                child.github_issue_id = int(issue_match.group(1))
+            self.children[item_id] = child
+            await self._register_startup_watch(item_id, child, mode)
+            self._save_children_state()
+            await self._post(f":rocket: *{label}*: New session started (`{mode}`)", item_id=item_id)
+            logger.info("Spawned child for %s (mode=%s)", label, mode)
+        except Exception as e:
+            self._cleanup_session(item_id)
+            await self._post(f":rotating_light: *{label}*: Failed to spawn session — `{e}`")
+            logger.error("Failed to spawn for %s: %s", label, e, exc_info=True)
+
+    def _on_spawn_done(self, task: asyncio.Task) -> None:
+        """Callback when a background spawn task completes."""
+        self._spawn_tasks.discard(task)
+        if task.cancelled():
+            logger.info("Spawn task %s was cancelled", task.get_name())
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Unexpected error in spawn task %s: %s", task.get_name(), exc)
 
     # Keep _format_duration as a static alias for backward compatibility
     _format_duration = staticmethod(format_duration)
@@ -943,7 +967,7 @@ class Orchestrator:
             return adopted
 
         for wname in windows:
-            item_id = parse_window_name(wname)
+            item_id = parse_window_name(wname, self.config)
             if item_id is None:
                 continue
 
@@ -974,6 +998,13 @@ class Orchestrator:
 
     async def _shutdown(self) -> None:
         """Graceful shutdown — preserve child sessions."""
+        if self._spawn_tasks:
+            logger.info("Waiting for %d in-flight spawn(s)…", len(self._spawn_tasks))
+            _done, pending = await asyncio.wait(self._spawn_tasks, timeout=10)
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         active = [self._item_label(n) for n, c in self.children.items() if c is not None]
         if active:
             logger.info(

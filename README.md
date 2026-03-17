@@ -20,8 +20,8 @@ Sessions survive network drops and orchestrator restarts, and everything is obse
 
 ## Features
 
-- **Smart routing** — with `ANTHROPIC_API_KEY` set and `llm_routing: true`, bare messages are automatically classified by Claude Haiku to the right session. No `@Claude1` prefixes needed — just type naturally and homebound figures out which agent should handle it.
-- **Multi-session** — up to N concurrent agents in tmux, addressed via `@Claude` or `@Claude1`
+- **Smart routing** — with `ANTHROPIC_API_KEY` set and `llm_routing: true`, bare messages are automatically classified by Claude Haiku to the right session. No `@Agent1` prefixes needed — just type naturally and homebound figures out which agent should handle it.
+- **Multi-session** — up to N concurrent agents in tmux, addressed via `@Agent` or `@Agent1` (configurable via `sessions.agent_label`)
 - **Crash recovery** — state persistence (`children.json`), orphan re-adoption on restart
 - **GitHub integration** — list, create, view, and close issues directly from Slack
 - **Security** — user allowlists, session ownership, destructive command confirmation
@@ -64,7 +64,7 @@ Sessions survive network drops and orchestrator restarts, and everything is obse
 
 ```bash
 git clone https://github.com/anoopy/homebound-agents
-cd homebound
+cd homebound-agents
 python3 -m venv venv   # Must be Python 3.10+; use python3.13 if python3 is older
 source venv/bin/activate
 pip install --upgrade pip
@@ -106,7 +106,7 @@ routing:
   llm_routing: true  # Recommended — requires ANTHROPIC_API_KEY
 ```
 
-> **Recommended:** Enable `llm_routing` for significantly better message routing. Without it, bare messages (those without `@Claude` prefixes) can only be routed via thread replies or auto-spawned as new sessions. With LLM routing enabled, Claude Haiku classifies each unmatched message to the best active session based on context — so you can just type "what about the auth bug?" and it routes to the right agent automatically.
+> **Recommended:** Enable `llm_routing` for significantly better message routing. Without it, bare messages (those without `@Agent` prefixes) can only be routed via thread replies or auto-spawned as new sessions. With LLM routing enabled, Claude Haiku classifies each unmatched message to the best active session based on context — so you can just type "what about the auth bug?" and it routes to the right agent automatically.
 
 ### 6. Set your tokens
 
@@ -133,9 +133,9 @@ scripts/homeboundctl.sh start --config homebound.yaml
 ```text
 @homebound help                              → list all commands
 @homebound status                            → show active sessions
-@Claude fix the login bug for #42            → spawn agent on issue #42
+@Agent fix the login bug for #42             → spawn agent on issue #42
 what about the auth middleware?               → smart-routed to the right agent (llm_routing: true)
-@Claude1 close                               → close session 1
+@Agent1 close                                → close session 1
 ```
 
 ## Architecture
@@ -173,6 +173,8 @@ Incoming Slack message
 
 Without LLM routing, step 2 (keyword matching) still runs before falling through to auto-spawn. With LLM routing enabled, Haiku reads the message along with recent conversation context (last 5 messages) and each session's keywords, then routes to the best match (~200-500ms per classification). This is the difference between "every bare message spawns a new agent" and "messages intelligently reach the right agent."
 
+> **Note:** Agent names are configurable via `sessions.agent_label`. Set it to `"Claude"`, `"Bot"`, or any alphabetic name. Labels, tmux windows, Slack commands, and all internal naming derive from this single field.
+
 Adding a new adapter is straightforward: implement the ABC, add a `from_config` classmethod, and register it in the adapter registry.
 
 ## Configuration
@@ -185,7 +187,7 @@ Run `homebound init` to generate a complete starter config. Key sections:
 | `transport` | Slack channel, token, polling |
 | `tracker` | GitHub project dir, admin pattern |
 | `runtime` | Agent CLI command, idle markers |
-| `sessions` | Max concurrent, timeouts, retries |
+| `sessions` | Agent label, max concurrent, timeouts, retries |
 | `routing` | Thread routing, LLM routing, auto-spawn |
 | `prompt_relay` | Detect and relay CLI prompts to Slack |
 | `modes` | Chat prompt templates |
@@ -239,6 +241,7 @@ All configuration lives in `homebound.yaml`. Run `homebound init` to generate a 
 
 | Field | Default | Description |
 |-------|---------|-------------|
+| `agent_label` | `"Agent"` | User-facing name — labels become `Agent1`, windows `AGENT-1`, Slack commands `@Agent1`. Set to `"Claude"`, `"Bot"`, etc. for custom naming. |
 | `max_concurrent` | `5` | Maximum parallel agent sessions |
 | `idle_timeout` | `1800` | Seconds before idle detection (30 min) |
 | `init_timeout` | `60` | Seconds to wait for agent prompt after spawn |
@@ -327,7 +330,7 @@ The script auto-sources `.env` from the repo root, injecting `SLACK_BOT_TOKEN` a
 
 ```bash
 git clone https://github.com/anoopy/homebound-agents
-cd homebound
+cd homebound-agents
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
@@ -364,7 +367,7 @@ src/homebound/
   trackers/              # Tracker implementations
     github.py
 
-tests/                   # 279 tests across all modules
+tests/                   # 296 tests across all modules
 scripts/
   homeboundctl.sh        # tmux session manager
   watchdog.sh            # Auto-restart watchdog

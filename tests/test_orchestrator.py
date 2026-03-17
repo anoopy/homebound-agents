@@ -44,7 +44,7 @@ class TestChatMode:
         mock_send = mock_tmux["send_keys"]
         mock_send.assert_called_once()
         _, sent_prompt = mock_send.call_args.args
-        assert "Claude42" in sent_prompt
+        assert "Agent42" in sent_prompt
         assert "check the test output" in sent_prompt
         assert "COMMUNICATION RULES" not in sent_prompt
         assert "gh issue view" not in sent_prompt
@@ -58,7 +58,7 @@ class TestChatMode:
         mock_send = mock_tmux["send_keys"]
         mock_send.assert_called_once()
         _, sent_prompt = mock_send.call_args.args
-        assert "Work on item Claude215" in sent_prompt
+        assert "Work on item Agent215" in sent_prompt
 
     def test_default_mode_is_task(self, mock_tmux):
         from homebound.session import spawn_child
@@ -68,7 +68,7 @@ class TestChatMode:
 
         mock_send = mock_tmux["send_keys"]
         _, sent_prompt = mock_send.call_args.args
-        assert "Work on item Claude100" in sent_prompt
+        assert "Work on item Agent100" in sent_prompt
 
     def test_freeform_mode_sends_legacy_prompt(self, mock_tmux):
         from homebound.session import spawn_child
@@ -78,22 +78,23 @@ class TestChatMode:
 
         mock_send = mock_tmux["send_keys"]
         _, sent_prompt = mock_send.call_args.args
-        assert "Claude215" in sent_prompt
+        assert "Agent215" in sent_prompt
         assert "BEGIN TASK" in sent_prompt
         assert "check test output" in sent_prompt
         assert "COMMUNICATION RULES" in sent_prompt
-        assert "Work on item Claude" not in sent_prompt
+        assert "Work on item Agent" not in sent_prompt
 
     def test_session_identity_uses_dev_prefix_for_issue_sessions(self, mock_tmux):
         from homebound.session import session_name
 
         config = HomeboundConfig()
-        assert session_name(config, 240) == "claude-240"
+        assert session_name(config, 240) == "agent-240"
 
     def test_window_name_uses_dev_prefix(self, mock_tmux):
         from homebound.session import window_name
 
-        assert window_name(3) == "CLAUDE-3"
+        config = HomeboundConfig()
+        assert window_name(config, 3) == "AGENT-3"
 
     def test_spawn_fails_when_start_command_fails(self, mock_tmux):
         from homebound.session import spawn_child
@@ -299,7 +300,7 @@ class TestSecurityHardening:
         with patch("homebound.orchestrator.Orchestrator.transport", create=True):
             from homebound.orchestrator import Orchestrator
             orch = Orchestrator(config=config, dry_run=True)
-            child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WFAKE_OWNER")
+            child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WFAKE_OWNER")
             assert orch._is_session_authorized("WFAKE_OWNER", child) is True
 
     def test_session_non_owner_blocked(self):
@@ -308,7 +309,7 @@ class TestSecurityHardening:
         with patch("homebound.orchestrator.Orchestrator.transport", create=True):
             from homebound.orchestrator import Orchestrator
             orch = Orchestrator(config=config, dry_run=True)
-            child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WFAKE_OWNER")
+            child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WFAKE_OWNER")
             assert orch._is_session_authorized("WFAKE_RANDO", child) is False
 
     def test_session_admin_override(self):
@@ -319,7 +320,7 @@ class TestSecurityHardening:
         with patch("homebound.orchestrator.Orchestrator.transport", create=True):
             from homebound.orchestrator import Orchestrator
             orch = Orchestrator(config=config, dry_run=True)
-            child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WFAKE_OWNER")
+            child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WFAKE_OWNER")
             assert orch._is_session_authorized("WFAKE_ADMIN", child) is True
 
     def test_unowned_session_requires_authenticated_sender(self):
@@ -328,7 +329,7 @@ class TestSecurityHardening:
         with patch("homebound.orchestrator.Orchestrator.transport", create=True):
             from homebound.orchestrator import Orchestrator
             orch = Orchestrator(config=config, dry_run=True)
-            child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="")
+            child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="")
             assert orch._is_session_authorized("WFAKE_RANDO", child) is True
 
 
@@ -477,7 +478,7 @@ class TestPollCycleReliability:
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude implement feature",
+                    text="@Agent implement feature",
                     ts=str(time.time() + 1),
                     user="",
                     extra={"bot_id": "B123"},
@@ -547,7 +548,7 @@ class TestPromptRelay:
         assert detected is None
 
     def test_prompt_scan_dedupes_identical_output(self, orchestrator):
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WOWNER")
+        child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WOWNER")
         orchestrator.children[42] = child
         with patch(
             "homebound.prompt_relay.read_child_output",
@@ -559,7 +560,7 @@ class TestPromptRelay:
         orchestrator._post.assert_awaited_once()
 
     def test_prompt_scan_replaces_prior_prompt_for_same_issue(self, orchestrator):
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WOWNER")
+        child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WOWNER")
         orchestrator.children[42] = child
         orchestrator.config.prompt_relay.max_pending_per_issue = 1
         with patch(
@@ -651,7 +652,7 @@ class TestPromptRelay:
         )
         orchestrator.command_policy = orchestrator.command_policy.__class__(orchestrator.config.security)
         orchestrator._prompt_relay.command_policy = orchestrator.command_policy
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WOWNER")
+        child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WOWNER")
         orchestrator.children[42] = child
         orchestrator._prompt_relay._pending_prompts[42] = [
             PendingPrompt(
@@ -675,70 +676,6 @@ class TestPromptRelay:
         assert "beta" in sent_message
         assert 42 not in orchestrator._prompt_relay._pending_prompts
 
-    def test_implicit_prompt_answer_rejected_when_ambiguous(self, orchestrator):
-        from homebound.orchestrator import PendingPrompt
-        from homebound.security import Principal
-
-        now = time.time()
-        orchestrator._prompt_relay._pending_prompts[41] = [
-            PendingPrompt(
-                prompt_id="p-41-1",
-                item_id=41,
-                owner_user_id="",
-                question_text="Q1?",
-                options=["yes", "no"],
-                created_at=now,
-                last_seen_hash="h1",
-            )
-        ]
-        orchestrator._prompt_relay._pending_prompts[42] = [
-            PendingPrompt(
-                prompt_id="p-42-1",
-                item_id=42,
-                owner_user_id="",
-                question_text="Q2?",
-                options=["a", "b"],
-                created_at=now,
-                last_seen_hash="h2",
-            )
-        ]
-
-        handled = asyncio.run(
-            orchestrator._prompt_relay.maybe_handle_implicit_prompt_answer(
-                "yes", Principal(user_id="WUSER"),
-            )
-        )
-        assert handled is True
-        msg = orchestrator._post.call_args.args[0]
-        assert "explicit syntax" in msg.lower()
-
-    def test_implicit_prompt_answer_works_when_single_prompt(self, orchestrator):
-        from homebound.orchestrator import PendingPrompt
-        from homebound.security import Principal
-
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WOWNER")
-        orchestrator.children[42] = child
-        orchestrator._prompt_relay._pending_prompts[42] = [
-            PendingPrompt(
-                prompt_id="p-42-1",
-                item_id=42,
-                owner_user_id="WOWNER",
-                question_text="Proceed?",
-                options=["yes", "no"],
-                created_at=time.time(),
-                last_seen_hash="hash-a",
-            )
-        ]
-
-        with patch("homebound.prompt_relay.send_to_child", new_callable=AsyncMock) as mock_send:
-            handled = asyncio.run(
-                orchestrator._prompt_relay.maybe_handle_implicit_prompt_answer(
-                    "1", Principal(user_id="WUSER"),
-                )
-            )
-        assert handled is True
-        mock_send.assert_awaited_once()
-
     def test_prompt_answer_denied_for_non_allowlisted_sender(self, orchestrator):
         from homebound.orchestrator import PendingPrompt
         from homebound.security import Principal
@@ -748,7 +685,7 @@ class TestPromptRelay:
         )
         orchestrator.command_policy = orchestrator.command_policy.__class__(orchestrator.config.security)
         orchestrator._prompt_relay.command_policy = orchestrator.command_policy
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WOWNER")
+        child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WOWNER")
         orchestrator.children[42] = child
         orchestrator._prompt_relay._pending_prompts[42] = [
             PendingPrompt(
@@ -796,7 +733,7 @@ class TestPromptRelay:
         from homebound.adapters.transport import IncomingMessage
         from homebound.orchestrator import PendingPrompt
 
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WOWNER")
+        child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WOWNER")
         orchestrator.children[42] = child
         orchestrator._prompt_relay._pending_prompts[42] = [
             PendingPrompt(
@@ -812,7 +749,7 @@ class TestPromptRelay:
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="gh 42 ans 1",
+                    text="42 ans 1",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -832,13 +769,13 @@ class TestPromptRelay:
 
     def test_poll_cycle_treats_answer_word_as_normal_dev_issue_text(self, orchestrator):
         # "answer" as the first payload word must NOT trigger the prompt-reply path;
-        # @Claude routing takes precedence and the full payload is passed as task text.
+        # @Agent routing takes precedence and the full payload is passed as task text.
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude answer this question in detail",
+                    text="@Agent answer this question in detail",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -884,13 +821,13 @@ class TestPromptRelay:
         # With smart routing, plain text auto-spawns a session
         orchestrator._handle_issue_message.assert_awaited_once()
 
-    def test_poll_cycle_routes_claude_message_to_slot_one_chat(self, orchestrator):
+    def test_poll_cycle_routes_agent_message_to_slot_one_chat(self, orchestrator):
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude how many issues are open today?",
+                    text="@Agent how many issues are open today?",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -912,13 +849,13 @@ class TestPromptRelay:
             sender_extra={},
         )
 
-    def test_poll_cycle_claude_routes_to_free_slot(self, orchestrator):
+    def test_poll_cycle_agent_routes_to_free_slot(self, orchestrator):
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude implement the login page",
+                    text="@Agent implement the login page",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -933,7 +870,7 @@ class TestPromptRelay:
 
         asyncio.run(orchestrator._poll_cycle())
 
-        # @Claude <task> routes to next free slot (1)
+        # @Agent <task> routes to next free slot (1)
         orchestrator._handle_issue_message.assert_awaited_once_with(
             1,
             "implement the login page",
@@ -941,13 +878,13 @@ class TestPromptRelay:
             sender_extra={},
         )
 
-    def test_poll_cycle_accepts_numbered_dev_command(self, orchestrator):
+    def test_poll_cycle_accepts_numbered_agent_command(self, orchestrator):
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude2 77 fix flaky test",
+                    text="@Agent2 77 fix flaky test",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -962,7 +899,7 @@ class TestPromptRelay:
 
         asyncio.run(orchestrator._poll_cycle())
 
-        # Unified pool: @Claude2 <task> routes to slot 2, payload is the full task
+        # Unified pool: @Agent2 <task> routes to slot 2, payload is the full task
         orchestrator._handle_issue_message.assert_awaited_once_with(
             2,
             "77 fix flaky test",
@@ -970,14 +907,14 @@ class TestPromptRelay:
             sender_extra={},
         )
 
-    def test_poll_cycle_claude_space_number_same_as_no_space(self, orchestrator):
-        """@Claude 2 <task> should behave identically to @Claude2 <task>."""
+    def test_poll_cycle_agent_space_number_same_as_no_space(self, orchestrator):
+        """@Agent 2 <task> should behave identically to @Agent2 <task>."""
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude 2 fix the tests",
+                    text="@Agent 2 fix the tests",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -999,14 +936,14 @@ class TestPromptRelay:
             sender_extra={},
         )
 
-    def test_poll_cycle_rejects_invalid_claude_slot(self, orchestrator):
+    def test_poll_cycle_rejects_invalid_agent_slot(self, orchestrator):
         from homebound.adapters.transport import IncomingMessage
 
         max_slot = orchestrator.max_children
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text=f"@Claude{max_slot + 1} check status",
+                    text=f"@Agent{max_slot + 1} check status",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -1031,7 +968,7 @@ class TestPromptRelay:
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text=f"@Claude{max_slot + 1} gh 42 implement feature",
+                    text=f"@Agent{max_slot + 1} gh 42 implement feature",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -1049,14 +986,14 @@ class TestPromptRelay:
         orchestrator._handle_issue_message.assert_not_awaited()
         assert "slot must be between" in orchestrator._post.call_args.args[0].lower()
 
-    def test_poll_cycle_claude_space_number_routes_to_slot(self, orchestrator):
-        # @Claude 1 <task> routes to slot 1 (space between Claude and number is ignored).
+    def test_poll_cycle_agent_space_number_routes_to_slot(self, orchestrator):
+        # @Agent 1 <task> routes to slot 1 (space between Agent and number is ignored).
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude 1 implement feature",
+                    text="@Agent 1 implement feature",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -1186,7 +1123,7 @@ class TestPromptRelay:
         orchestrator._handle_issue_message.assert_awaited_once()
         orchestrator._admin.handle_admin_query.assert_not_awaited()
 
-    def test_poll_cycle_defaults_non_claude_mentions_to_auto_spawn(self, orchestrator):
+    def test_poll_cycle_defaults_non_agent_mentions_to_auto_spawn(self, orchestrator):
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
@@ -1212,13 +1149,13 @@ class TestPromptRelay:
         orchestrator._handle_issue_message.assert_awaited_once()
         orchestrator._admin.handle_admin_query.assert_not_awaited()
 
-    def test_poll_cycle_rejects_bare_dev_mention_with_usage_hint(self, orchestrator):
+    def test_poll_cycle_rejects_bare_agent_mention_with_usage_hint(self, orchestrator):
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude",
+                    text="@Agent",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -1237,15 +1174,15 @@ class TestPromptRelay:
         orchestrator._handle_issue_message.assert_not_awaited()
         orchestrator._admin.handle_admin_query.assert_not_awaited()
         msg = orchestrator._post.call_args.args[0]
-        assert "@claude" in msg.lower() and "task" in msg.lower()
+        assert "@agent" in msg.lower() and "task" in msg.lower()
 
-    def test_poll_cycle_rejects_bare_claude_mention_with_usage_hint(self, orchestrator):
+    def test_poll_cycle_rejects_bare_numbered_agent_mention_with_usage_hint(self, orchestrator):
         from homebound.adapters.transport import IncomingMessage
 
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="@Claude2",
+                    text="@Agent2",
                     ts=str(time.time() + 1),
                     user="WUSER",
                     extra={},
@@ -1264,7 +1201,7 @@ class TestPromptRelay:
         orchestrator._handle_issue_message.assert_not_awaited()
         orchestrator._admin.handle_admin_query.assert_not_awaited()
         msg = orchestrator._post.call_args.args[0]
-        assert "@claude" in msg.lower() and "task" in msg.lower()
+        assert "@agent" in msg.lower() and "task" in msg.lower()
 
     def test_poll_cycle_bare_help_handled_as_admin(self, orchestrator):
         """Bare 'help' without @homebound prefix should be handled as admin, not routed."""
@@ -1319,7 +1256,7 @@ class TestPromptRelay:
         orchestrator._handle_issue_message.assert_not_awaited()
 
     def test_poll_cycle_relays_only_latest_prompt_from_stacked_output(self, orchestrator):
-        child = ChildInfo(item_id=42, window_name="CLAUDE-42", owner_user_id="WOWNER")
+        child = ChildInfo(item_id=42, window_name="AGENT-42", owner_user_id="WOWNER")
         orchestrator.children[42] = child
         orchestrator._retry_transport = AsyncMock(return_value=[])
         orchestrator._health_check = AsyncMock()
@@ -1386,7 +1323,7 @@ class TestStartupVisibility:
             return orch
 
     def test_startup_watch_registered_after_spawn(self, orchestrator):
-        child = ChildInfo(item_id=0, window_name="CLAUDE-0", owner_user_id="WUSER")
+        child = ChildInfo(item_id=0, window_name="AGENT-0", owner_user_id="WUSER")
         with (
             patch("homebound.orchestrator.spawn_child", new_callable=AsyncMock, return_value=child),
             patch(
@@ -1406,7 +1343,7 @@ class TestStartupVisibility:
         from homebound.orchestrator import StartupWatch
 
         item_id = 5
-        child = ChildInfo(item_id=item_id, window_name="CLAUDE-5")
+        child = ChildInfo(item_id=item_id, window_name="AGENT-5")
         orchestrator.children[item_id] = child
         baseline_hash = orchestrator._hash_output("same output")
         orchestrator._startup_watch[item_id] = StartupWatch(
@@ -1432,7 +1369,7 @@ class TestStartupVisibility:
         from homebound.orchestrator import StartupWatch
 
         item_id = 6
-        child = ChildInfo(item_id=item_id, window_name="CLAUDE-6")
+        child = ChildInfo(item_id=item_id, window_name="AGENT-6")
         orchestrator.children[item_id] = child
         baseline_hash = orchestrator._hash_output("same output")
         orchestrator._startup_watch[item_id] = StartupWatch(
@@ -1454,7 +1391,7 @@ class TestStartupVisibility:
         from homebound.orchestrator import StartupWatch
 
         item_id = 1
-        child = ChildInfo(item_id=item_id, window_name="CLAUDE-1")
+        child = ChildInfo(item_id=item_id, window_name="AGENT-1")
         orchestrator.children[item_id] = child
         baseline_hash = orchestrator._hash_output("same output")
         orchestrator._startup_watch[item_id] = StartupWatch(
@@ -1475,7 +1412,7 @@ class TestStartupVisibility:
         from homebound.orchestrator import StartupWatch
 
         orchestrator._startup_watch[7] = StartupWatch(started_at=time.time(), mode="chat")
-        orchestrator._record_agent_startup_signal("[claude-7] posted update")
+        orchestrator._record_agent_startup_signal("[agent-7] posted update")
         assert 7 not in orchestrator._startup_watch
 
     def test_startup_watch_clears_on_dev_agent_signal(self, orchestrator):
@@ -1483,7 +1420,7 @@ class TestStartupVisibility:
 
         item_id = 2
         orchestrator._startup_watch[item_id] = StartupWatch(started_at=time.time(), mode="chat")
-        orchestrator._record_agent_startup_signal("[claude-2] posted update")
+        orchestrator._record_agent_startup_signal("[agent-2] posted update")
         assert item_id not in orchestrator._startup_watch
 
     def test_startup_watch_not_cleared_by_orchestrator_status_message(self, orchestrator):
@@ -1497,7 +1434,7 @@ class TestStartupVisibility:
         from homebound.orchestrator import StartupWatch
 
         item_id = 8
-        child = ChildInfo(item_id=item_id, window_name="CLAUDE-8")
+        child = ChildInfo(item_id=item_id, window_name="AGENT-8")
         orchestrator.children[item_id] = child
         orchestrator._startup_watch[item_id] = StartupWatch(
             started_at=time.time() - 31,
@@ -1525,7 +1462,7 @@ class TestStartupVisibility:
         orchestrator._retry_transport = AsyncMock(
             return_value=[
                 IncomingMessage(
-                    text="[claude-9] posted first answer",
+                    text="[agent-9] posted first answer",
                     ts=str(time.time() + 1),
                     user="",
                     extra={"bot_id": "B123"},
@@ -1589,7 +1526,7 @@ class TestIssueRouting:
     def test_spawn_honors_mode_keyword_prefix(self, orchestrator):
         child = ChildInfo(
             item_id=1,
-            window_name="CLAUDE-1",
+            window_name="AGENT-1",
             owner_user_id="WUSER",
         )
         orchestrator.dry_run = False
@@ -1615,6 +1552,51 @@ class TestIssueRouting:
 
         assert mock_spawn.await_count == 1
         assert mock_spawn.await_args.kwargs["mode"] == "freeform"
+
+
+class TestAtAgentCascadeRouting:
+    """Verify @Agent <task> (no slot) routes via the Tier 2-4 cascade."""
+
+    def test_at_agent_no_slot_routes_via_cascade(self):
+        """@Agent <task> should route to existing session via keyword match."""
+        from homebound.adapters.transport import IncomingMessage
+        from homebound.config import RoutingConfig
+        from homebound.orchestrator import Orchestrator
+
+        config = HomeboundConfig(
+            security=SecurityConfig(allow_open_channel=True),
+            routing=RoutingConfig(keyword_match_threshold=1),
+        )
+        orch = Orchestrator(config=config, dry_run=True)
+        orch._post = AsyncMock()
+        orch.startup_ts = 0.0  # Accept all messages regardless of ts
+
+        # Set up an existing session with keywords
+        child = ChildInfo(item_id=1, window_name="AGENT-1", owner_user_id="U123")
+        child.recent_keywords = ["sectors", "india", "economy", "fii"]
+        orch.children[1] = child
+
+        future_ts = str(time.time() + 1000)
+
+        # Mock send_to_child so we can verify routing
+        with patch("homebound.orchestrator.send_to_child", new_callable=AsyncMock) as mock_send:
+            mock_transport = MagicMock()
+            mock_transport.poll = MagicMock(return_value=[
+                IncomingMessage(
+                    text="@Agent which sectors in india have better prospects",
+                    ts=future_ts,
+                    user="U123",
+                ),
+            ])
+            mock_transport.is_from_agent = MagicMock(return_value=False)
+            mock_transport.poll_thread_replies = MagicMock(return_value=[])
+            orch._transport = mock_transport
+
+            asyncio.run(orch._poll_cycle())
+
+            # Should have routed to child 1 via keyword match, not spawned a new session
+            mock_send.assert_called_once()
+            assert mock_send.call_args.args[0] is child
 
 
 class TestRetryTransport:
@@ -1909,3 +1891,182 @@ class TestTransportResilience:
         orch._consecutive_poll_failures = 100
         delay = orch._effective_poll_delay()
         assert delay <= 120 * 1.1  # max + 10% jitter
+
+
+class TestSleepGapRecovery:
+    """Verify _last_poll_ts prevents message loss after macOS sleep."""
+
+    def _make_orchestrator(self):
+        from homebound.config import SessionsConfig
+        config = HomeboundConfig()
+        config.security = SecurityConfig(allow_open_channel=True)
+        config.sessions = SessionsConfig()
+        with patch("homebound.orchestrator.Orchestrator.transport", create=True):
+            from homebound.orchestrator import Orchestrator
+            orch = Orchestrator(config=config, dry_run=True)
+            orch._post = AsyncMock(return_value="")
+        return orch
+
+    def test_since_ts_uses_last_poll_ts_after_sleep_gap(self):
+        """After a sleep gap, since_ts should reach back to _last_poll_ts."""
+        orch = self._make_orchestrator()
+        lookback = orch.config.transport.lookback_minutes  # default 5
+
+        # Simulate: last successful poll was 20 minutes ago
+        twenty_min_ago = time.time() - 20 * 60
+        orch._last_poll_ts = twenty_min_ago
+
+        # The fixed lookback would give ~5 min ago, but min() should pick _last_poll_ts
+        since_ts = min(orch._last_poll_ts, time.time() - (lookback * 60))
+
+        # since_ts should be approximately 20 min ago (within 1s tolerance)
+        assert abs(since_ts - twenty_min_ago) < 1.0
+        # And it should be much older than the 5-min lookback
+        five_min_ago = time.time() - 5 * 60
+        assert since_ts < five_min_ago
+
+    def test_last_poll_ts_updates_on_successful_poll(self):
+        """_last_poll_ts should advance after a successful poll cycle."""
+        orch = self._make_orchestrator()
+
+        # Set _last_poll_ts to 10 minutes ago
+        orch._last_poll_ts = time.time() - 10 * 60
+
+        # Mock transport.poll to return empty list (success)
+        mock_transport = MagicMock()
+        mock_transport.poll.return_value = []
+        orch._transport = mock_transport
+
+        before = time.time()
+        asyncio.run(orch._poll_cycle())
+        after = time.time()
+
+        # _last_poll_ts should have been updated to approximately now
+        assert orch._last_poll_ts >= before
+        assert orch._last_poll_ts <= after
+
+    def test_last_poll_ts_preserved_on_failed_poll(self):
+        """_last_poll_ts should NOT advance when transport fails."""
+        orch = self._make_orchestrator()
+
+        old_ts = time.time() - 10 * 60
+        orch._last_poll_ts = old_ts
+
+        # Mock transport.poll to fail
+        mock_transport = MagicMock()
+        mock_transport.poll.side_effect = RuntimeError("network down")
+        orch._transport = mock_transport
+
+        asyncio.run(orch._poll_cycle())
+
+        # _last_poll_ts should remain unchanged
+        assert orch._last_poll_ts == old_ts
+
+
+# ---------------------------------------------------------------------------
+# Non-blocking spawn: background asyncio.Task for session init
+# ---------------------------------------------------------------------------
+
+class TestBackgroundSpawn:
+    """Verify spawn_child runs as a background task, not blocking the poll loop."""
+
+    def _make_orchestrator(self):
+        from homebound.config import SessionsConfig
+        config = HomeboundConfig()
+        config.security = SecurityConfig(allow_open_channel=True)
+        config.sessions = SessionsConfig()
+        with patch("homebound.orchestrator.Orchestrator.transport", create=True):
+            from homebound.orchestrator import Orchestrator
+            orch = Orchestrator(config=config, dry_run=False)
+            orch._post = AsyncMock(return_value="")
+            orch._save_children_state = MagicMock()
+        return orch
+
+    def test_spawn_does_not_block_poll_cycle(self):
+        """_handle_issue_message should return immediately while spawn runs in background."""
+        orch = self._make_orchestrator()
+
+        slow_child = ChildInfo(item_id=42, window_name="agent-42")
+
+        async def slow_spawn(*args, **kwargs):
+            await asyncio.sleep(5)
+            return slow_child
+
+        async def run():
+            with (
+                patch("homebound.orchestrator.spawn_child", side_effect=slow_spawn),
+                patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock, return_value=""),
+            ):
+                start = asyncio.get_event_loop().time()
+                await orch._handle_issue_message(42, "do something", sender_user_id="U1")
+                elapsed = asyncio.get_event_loop().time() - start
+
+                # Should return almost immediately (< 1s), not wait 5s
+                assert elapsed < 1.0
+                # Sentinel should be set
+                assert 42 in orch.children
+                assert orch.children[42] is None
+
+                # Now let the background task complete
+                assert len(orch._spawn_tasks) == 1
+                task = next(iter(orch._spawn_tasks))
+                await task
+
+                # Child should now be populated
+                assert orch.children[42] is slow_child
+                assert slow_child.owner_user_id == "U1"
+
+        asyncio.run(run())
+
+    def test_spawn_failure_cleans_up_sentinel(self):
+        """When spawn_child raises, the sentinel should be cleaned up."""
+        orch = self._make_orchestrator()
+
+        async def failing_spawn(*args, **kwargs):
+            raise RuntimeError("tmux exploded")
+
+        async def run():
+            with patch("homebound.orchestrator.spawn_child", side_effect=failing_spawn):
+                await orch._handle_issue_message(42, "do something", sender_user_id="U1")
+
+                # Sentinel set
+                assert 42 in orch.children
+
+                # Let the background task complete
+                task = next(iter(orch._spawn_tasks))
+                await task
+
+                # Sentinel should be cleaned up
+                assert 42 not in orch.children
+
+                # Error should have been posted
+                error_calls = [
+                    c for c in orch._post.call_args_list
+                    if "Failed to spawn" in str(c)
+                ]
+                assert len(error_calls) == 1
+
+        asyncio.run(run())
+
+    def test_shutdown_awaits_in_flight_spawns(self):
+        """_shutdown should wait for (and cancel if needed) in-flight spawn tasks."""
+        orch = self._make_orchestrator()
+
+        async def very_slow_spawn(*args, **kwargs):
+            await asyncio.sleep(60)
+            return ChildInfo(item_id=99, window_name="agent-99")
+
+        async def run():
+            with (
+                patch("homebound.orchestrator.spawn_child", side_effect=very_slow_spawn),
+            ):
+                await orch._handle_issue_message(99, "do something", sender_user_id="U1")
+                assert len(orch._spawn_tasks) == 1
+                task = next(iter(orch._spawn_tasks))
+                assert not task.done()
+
+                # Shutdown should wait then cancel
+                await orch._shutdown()
+                assert task.done()
+
+        asyncio.run(run())

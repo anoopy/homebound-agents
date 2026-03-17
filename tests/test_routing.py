@@ -41,9 +41,9 @@ class TestChildModeRouting:
         mock_send = mock_tmux["send_keys"]
         mock_send.assert_called_once()
         _, sent_prompt = mock_send.call_args.args
-        assert "Work on item Claude215" in sent_prompt
+        assert "Work on item Agent215" in sent_prompt
         assert child.item_id == 215
-        assert child.window_name == "CLAUDE-215"
+        assert child.window_name == "AGENT-215"
 
     def test_freeform_mode_sends_legacy_prompt(self, mock_tmux):
         from homebound.session import spawn_child
@@ -54,11 +54,11 @@ class TestChildModeRouting:
         mock_send = mock_tmux["send_keys"]
         mock_send.assert_called_once()
         _, sent_prompt = mock_send.call_args.args
-        assert "Claude215" in sent_prompt
+        assert "Agent215" in sent_prompt
         assert "BEGIN TASK" in sent_prompt
         assert "check test output" in sent_prompt
         assert "COMMUNICATION RULES" in sent_prompt
-        assert "Work on item Claude" not in sent_prompt
+        assert "Work on item Agent" not in sent_prompt
 
     def test_default_mode_is_task(self, mock_tmux):
         from homebound.session import spawn_child
@@ -68,7 +68,7 @@ class TestChildModeRouting:
 
         mock_send = mock_tmux["send_keys"]
         _, sent_prompt = mock_send.call_args.args
-        assert "Work on item Claude100" in sent_prompt
+        assert "Work on item Agent100" in sent_prompt
 
     def test_task_prompt_ignores_task_text(self, mock_tmux):
         from homebound.session import spawn_child
@@ -79,7 +79,7 @@ class TestChildModeRouting:
         mock_send = mock_tmux["send_keys"]
         _, sent_prompt = mock_send.call_args.args
         assert "this long task description" not in sent_prompt
-        assert "Work on item Claude42" in sent_prompt
+        assert "Work on item Agent42" in sent_prompt
 
 
 class TestModeKeywordDetection:
@@ -120,7 +120,7 @@ class TestAgentPrefixFiltering:
         config = HomeboundConfig()
         prefixes = config.ignored_prefixes
         assert config.name in prefixes
-        assert "claude-" in prefixes
+        assert "agent-" in prefixes
 
     def test_agent_messages_filtered(self):
         """Slack messages from known agents must be caught."""
@@ -128,9 +128,9 @@ class TestAgentPrefixFiltering:
         prefixes = config.ignored_prefixes
 
         agent_messages = [
-            f"[{config.name}] Claude215: New session started.",
-            "[claude-42] Done.",
-            "[claude-1] Still working.",
+            f"[{config.name}] Agent215: New session started.",
+            "[agent-42] Done.",
+            "[agent-1] Still working.",
         ]
         for text in agent_messages:
             matched = any(f"[{prefix}" in text for prefix in prefixes)
