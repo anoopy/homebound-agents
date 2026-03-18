@@ -22,7 +22,7 @@ Sessions survive network drops and orchestrator restarts, and everything is obse
 
 ## Features
 
-- **Smart routing** — bare messages are automatically classified to the right session via Claude Haiku (`llm_routing: true`)
+- **Smart routing** — messages are routed to the right session via keyword matching (always on), thread replies, and optionally Claude Haiku for semantic classification (`llm_routing: true`)
 - **Multi-model pools** — run Claude Code and Codex (or any CLI) simultaneously (`@Claude1`, `@Codex1`)
 - **Multi-session** — up to N concurrent agents in tmux
 - **Crash recovery** — state persistence, orphan re-adoption on restart
@@ -101,6 +101,20 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ```bash
 scripts/homeboundctl.sh start --config homebound.yaml
+```
+
+### Monitoring agent sessions
+
+Attach to the tmux session to watch agents work in real time:
+
+```bash
+# Attach to the homebound tmux session
+scripts/homeboundctl.sh attach
+
+# Switch between windows inside tmux:
+#   Ctrl-b w        → list all windows (orchestrator, CLAUDE-1, CODEX-2, etc.)
+#   Ctrl-b n / p    → next / previous window
+#   Ctrl-b d        → detach (back to your shell, agents keep running)
 ```
 
 ### Example Slack commands
