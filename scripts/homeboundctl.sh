@@ -189,7 +189,7 @@ case "$CMD" in
       kill $orphan_pids 2>/dev/null || true
       sleep 1
     fi
-    remaining=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^(${WINDOW_PREFIX}|CLAUDE-)" || true)
+    remaining=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^[A-Z]+-[0-9]+" || true)
     if [ -n "$remaining" ]; then
       echo "Orchestrator stopped. Child sessions still running:"
       echo "$remaining" | sed 's/^/  /'
@@ -206,7 +206,7 @@ case "$CMD" in
       exit 0
     fi
     echo "Stopping everything in session '$SESSION'..."
-    children=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^(${WINDOW_PREFIX}|CLAUDE-)" || true)
+    children=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^[A-Z]+-[0-9]+" || true)
     if [ -n "$children" ]; then
       for child in $children; do
         echo "  Sending /exit to ${child}..."
@@ -267,7 +267,7 @@ case "$CMD" in
     else
       echo "Orchestrator:   NOT RUNNING (children may be orphaned)"
     fi
-    children=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^(${WINDOW_PREFIX}|CLAUDE-)" || true)
+    children=$(tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -E "^[A-Z]+-[0-9]+" || true)
     if [ -n "$children" ]; then
       child_count=$(echo "$children" | wc -l | tr -d ' ')
       echo "Children:       ${child_count} active"

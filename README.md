@@ -66,8 +66,8 @@ Sessions survive network drops and orchestrator restarts, and everything is obse
 ### 3. Install
 
 ```bash
-git clone https://github.com/anoopy/homebound-agents
-cd homebound
+git clone https://github.com/youruser/homebound-agents
+cd homebound-agents
 python3 -m venv venv   # Must be Python 3.10+; use python3.13 if python3 is older
 source venv/bin/activate
 pip install --upgrade pip
@@ -313,7 +313,7 @@ Pool names must be alphabetic. Each pool entry has the same fields as `runtime:`
 | `thread_poll_max_age` | `1800` | Max age in seconds for threads to poll (default 30 min) |
 | `thread_poll_max_threads` | `10` | Max concurrent threads to poll per cycle |
 | `keyword_routing` | `true` | Route via keyword overlap between message and session context |
-| `keyword_match_threshold` | `2` | Minimum keyword overlap score to trigger routing |
+| `keyword_match_threshold` | `1` | Minimum keyword overlap score to trigger routing |
 | `llm_routing` | `false` | **Recommended.** Use Claude Haiku to classify bare messages to the best active session. Set to `true` and provide `ANTHROPIC_API_KEY` for significantly smarter routing. |
 | `llm_model` | `"claude-haiku-4-5"` | Model used for LLM routing |
 | `auto_spawn_on_no_match` | `true` | Auto-spawn a new session when no match found |
@@ -338,8 +338,8 @@ Pool names must be alphabetic. Each pool entry has the same fields as `runtime:`
 | `poll_every_cycles` | `1` | Scan frequency (every N poll cycles) |
 | `option_patterns` | *(regex list)* | Patterns to detect option lines in CLI output |
 | `question_mark_required` | `true` | Require `?` in question line for prompt detection |
-| `ttl_seconds` | `300` | Pending prompt expiry (5 min) |
-| `max_pending_per_issue` | `3` | Max pending prompts per session |
+| `ttl_seconds` | `900` | Pending prompt expiry (15 min) |
+| `max_pending_per_issue` | `1` | Max pending prompts per session |
 
 ### `modes`
 
@@ -381,8 +381,8 @@ The script auto-sources `.env` from the repo root, injecting `SLACK_BOT_TOKEN` a
 ## Development
 
 ```bash
-git clone https://github.com/anoopy/homebound-agents
-cd homebound
+git clone https://github.com/youruser/homebound-agents
+cd homebound-agents
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
