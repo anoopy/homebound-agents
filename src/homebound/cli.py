@@ -126,6 +126,18 @@ runtime:
   exit_command: "{d.runtime.exit_command}"
   env_unset: {yaml_list(d.runtime.env_unset)}
 
+# Multi-runtime pools (optional) — uncomment to run multiple AI backends simultaneously.
+# Each pool gets its own label prefix (e.g. @Claude1, @Codex1).
+# When present, the top-level `runtime:` key is ignored.
+# runtimes:
+#   claude:
+#     type: claude-code
+#     command: "claude --dangerously-skip-permissions"
+#   codex:
+#     type: generic
+#     command: "codex --no-alt-screen --full-auto"
+#     idle_markers: ["›"]
+
 sessions:
   agent_label: "{d.sessions.agent_label}"  # User-facing name: Agent1, Agent2 (or Claude, Bot, etc.)
   max_concurrent: {d.sessions.max_concurrent}
@@ -177,6 +189,16 @@ close_commands: {yaml_list(sorted(d.close_commands))}
     print(f"Created {output}")
 
 
+def _tmux_session_running(session: str) -> bool:
+    """Check if a tmux session exists."""
+    import subprocess
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", session],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show orchestrator status."""
     import subprocess
@@ -186,11 +208,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     session = config.tmux_session_name
 
-    result = subprocess.run(
-        ["tmux", "has-session", "-t", session],
-        capture_output=True,
-    )
-    if result.returncode != 0:
+    if not _tmux_session_running(session):
         print(f"Homebound not running (session '{session}').")
         return
 
@@ -210,11 +228,7 @@ def cmd_stop(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     session = config.tmux_session_name
 
-    result = subprocess.run(
-        ["tmux", "has-session", "-t", session],
-        capture_output=True,
-    )
-    if result.returncode != 0:
+    if not _tmux_session_running(session):
         print(f"Homebound not running (session '{session}').")
         return
 

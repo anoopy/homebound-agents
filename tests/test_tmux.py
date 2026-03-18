@@ -77,3 +77,83 @@ def test_wait_for_prompt_fails_after_repeated_capture_errors():
     ):
         ready = asyncio.run(wait_for_prompt("homebound:CLAUDE-240", timeout=5, idle_markers=["PROMPT>"]))
     assert ready is False
+
+
+def test_run_tmux_returns_error_on_timeout():
+    """run_tmux should return error code on timeout, not hang indefinitely."""
+    from homebound.tmux import run_tmux
+
+    async def _hang_forever():
+        await asyncio.sleep(999)
+        return (b"", b"")
+
+    with patch("homebound.tmux.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_proc = AsyncMock()
+        mock_proc.communicate = _hang_forever
+        mock_proc.kill = lambda: None  # kill() is synchronous
+        mock_proc.wait = AsyncMock()
+        mock_exec.return_value = mock_proc
+
+        rc, stdout, stderr = asyncio.run(run_tmux("send-keys", "-t", "test", timeout=0.1))
+
+    assert rc == 1
+    assert "timeout" in stderr
+
+
+def test_send_keys_returns_false_on_timeout():
+    """send_keys should return False when tmux send-keys times out."""
+    from homebound.tmux import send_keys
+
+    with patch("homebound.tmux.run_tmux", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = (1, "", "timeout after 60.0s")
+        result = asyncio.run(send_keys("homebound:AGENT-1", "hello world"))
+
+    assert result is False
+
+
+def test_send_keys_cancels_copy_mode_before_sending():
+    """send_keys should cancel copy mode before sending literal text."""
+    from homebound.tmux import send_keys
+
+    call_log = []
+
+    async def _mock_run(*args, **kwargs):
+        call_log.append(args)
+        if "display-message" in args:
+            return (0, "1", "")  # pane is in copy mode
+        return (0, "", "")
+
+    with (
+        patch("homebound.tmux.run_tmux", side_effect=_mock_run),
+        patch("homebound.tmux.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        result = asyncio.run(send_keys("homebound:AGENT-1", "hello"))
+
+    assert result is True
+    # Should have: display-message (check), send-keys -X cancel, send-keys -l, send-keys Enter
+    commands = [args[0] for args in call_log]
+    assert "display-message" in commands
+    assert any("-X" in args and "cancel" in args for args in call_log)
+
+
+def test_send_keys_skips_cancel_when_not_in_copy_mode():
+    """send_keys should not cancel copy mode when pane is in normal mode."""
+    from homebound.tmux import send_keys
+
+    call_log = []
+
+    async def _mock_run(*args, **kwargs):
+        call_log.append(args)
+        if "display-message" in args:
+            return (0, "0", "")  # pane is NOT in copy mode
+        return (0, "", "")
+
+    with (
+        patch("homebound.tmux.run_tmux", side_effect=_mock_run),
+        patch("homebound.tmux.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        result = asyncio.run(send_keys("homebound:AGENT-1", "hello"))
+
+    assert result is True
+    # Should NOT have sent -X cancel
+    assert not any("-X" in args and "cancel" in args for args in call_log)

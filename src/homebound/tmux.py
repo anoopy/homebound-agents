@@ -31,15 +31,31 @@ def _find_tmux() -> str:
 _TMUX_BIN = _find_tmux()
 
 
-async def run_tmux(*args: str) -> tuple[int, str, str]:
-    """Run a tmux command and return (returncode, stdout, stderr)."""
+async def run_tmux(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:
+    """Run a tmux command and return (returncode, stdout, stderr).
+
+    Args:
+        *args: Arguments to pass to tmux.
+        timeout: Max seconds to wait before killing the subprocess.
+    """
     proc = await asyncio.create_subprocess_exec(
         _TMUX_BIN,
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.error(
+            "tmux command timed out after %.0fs: %s",
+            timeout, " ".join(args[:3]),
+        )
+        return (1, "", f"timeout after {timeout}s")
     return (
         proc.returncode if proc.returncode is not None else 0,
         stdout.decode().strip(),
@@ -70,7 +86,7 @@ async def wait_for_prompt(
         await asyncio.sleep(1)
         elapsed += 1
         rc, stdout, _ = await run_tmux(
-            "capture-pane", "-t", target, "-p", "-S", "-5",
+            "capture-pane", "-t", target, "-p", "-S", "-15",
         )
         if rc != 0:
             consecutive_failures += 1
@@ -84,11 +100,7 @@ async def wait_for_prompt(
         consecutive_failures = 0
         if stdout.strip():
             saw_output = True
-        last_lines = stdout.strip().splitlines()[-3:] if stdout.strip() else []
-        if any(
-            any(marker in line for marker in markers)
-            for line in last_lines
-        ):
+        if output_has_prompt(stdout, markers, scan_lines=15):
             logger.info("Prompt detected for %s after %ds", target, elapsed)
             return True
 
@@ -102,15 +114,11 @@ async def wait_for_prompt(
             await asyncio.sleep(1)
             elapsed += 1
             rc, stdout, _ = await run_tmux(
-                "capture-pane", "-t", target, "-p", "-S", "-5",
+                "capture-pane", "-t", target, "-p", "-S", "-15",
             )
             if rc != 0:
                 continue
-            last_lines = stdout.strip().splitlines()[-3:] if stdout.strip() else []
-            if any(
-                any(marker in line for marker in markers)
-                for line in last_lines
-            ):
+            if output_has_prompt(stdout, markers, scan_lines=15):
                 logger.info("Prompt detected for %s after %ds (extended wait)", target, elapsed)
                 return True
         logger.warning(
@@ -127,7 +135,7 @@ async def send_keys(target: str, message: str) -> bool:
     """Send a message to a tmux target via send-keys.
 
     Uses tmux literal flag (-l) to avoid interpreting special characters,
-    then sends Enter separately.
+    then sends Enter separately.  Cancels copy/search mode first if active.
 
     Args:
         target: tmux target (e.g. "session:window").
@@ -136,8 +144,20 @@ async def send_keys(target: str, message: str) -> bool:
     Returns:
         True if both send-keys calls succeeded.
     """
+    # Cancel copy/search mode if active — literal text sent to a pane in
+    # copy mode is interpreted as copy-mode commands, corrupting the pane.
+    rc_mode, mode_val, _ = await run_tmux(
+        "display-message", "-p", "-t", target, "#{pane_in_mode}",
+        timeout=5.0,
+    )
+    if rc_mode == 0 and mode_val.strip() == "1":
+        await run_tmux("send-keys", "-t", target, "-X", "cancel", timeout=5.0)
+        await asyncio.sleep(0.1)
+        logger.info("Cancelled copy mode for %s before sending keys", target)
+
     rc, _, err = await run_tmux(
         "send-keys", "-t", target, "-l", message,
+        timeout=60.0,
     )
     if rc != 0:
         logger.error("send-keys failed for %s: %s", target, err)
@@ -171,6 +191,21 @@ async def capture_pane(target: str, lines: int = 20) -> str:
         logger.error("capture-pane failed for %s: %s", target, err)
         return ""
     return stdout
+
+
+def output_has_prompt(output: str, markers: list[str], scan_lines: int = 10) -> bool:
+    """Check if tmux output contains an idle prompt marker.
+
+    Args:
+        output: Raw tmux capture-pane output.
+        markers: Strings that indicate the CLI is idle.
+        scan_lines: Number of trailing lines to check.
+
+    Returns:
+        True if any marker found in the trailing lines.
+    """
+    lines = output.strip().splitlines()[-scan_lines:] if output.strip() else []
+    return any(any(m in line for m in markers) for line in lines)
 
 
 async def list_windows(tmux_session: str) -> list[str]:

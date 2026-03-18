@@ -89,12 +89,29 @@ class SessionsConfig:
     max_retries: int = 3
     outage_threshold: int = 3       # consecutive poll failures before escalating
     outage_max_interval: int = 120  # max seconds between polls during outage
+    error_patterns: list[str] = field(default_factory=lambda: [
+        r"(?i)api\s*error.*5\d{2}",
+        r"(?i)internal\s+server\s+error",
+        r"(?i)api_error",
+        r"(?i)overloaded_error",
+        r"(?i)rate\s*limit\s*(exceeded|error)",
+        r"(?i)connection\s*(refused|reset|timed?\s*out)",
+    ])
+    error_scan_lines: int = 20
 
     def __post_init__(self):
         if not self.agent_label or not self.agent_label.isalpha():
             raise ValueError(
                 f"agent_label must be non-empty and alphabetic, got: {self.agent_label!r}"
             )
+        # Validate error_patterns compile as regex
+        for idx, pattern in enumerate(self.error_patterns):
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(
+                    f"SessionsConfig.error_patterns[{idx}] is not a valid regex: {e}"
+                ) from e
 
     @property
     def window_prefix(self) -> str:
@@ -178,6 +195,19 @@ class RoutingConfig:
     enrich_interval_cycles: int = 6  # Refresh keywords every N poll cycles (~60s at 10s poll)
     thread_poll_max_age: int = 1800  # Only poll threads < 30 min old
     thread_poll_max_threads: int = 10  # Max threads polled per cycle
+    busy_recency_seconds: int = 30  # Agent is "busy" if messaged within this window
+    busy_check_tmux: bool = False  # Also check tmux idle markers (slower, more accurate)
+
+
+_SLACK_FORMATTING_RULES = (
+    "SLACK FORMATTING (mandatory): "
+    "Format all Slack messages using Slack mrkdwn syntax for readability: "
+    "use *bold* for headings and key terms, _italic_ for emphasis, "
+    "`code` for values/commands, ```code blocks``` for multi-line output, "
+    "bullet lists with • or -, and > for blockquotes. "
+    "Structure responses with clear sections and line breaks. "
+    "Never post walls of unformatted text. "
+)
 
 
 @dataclass
@@ -248,6 +278,10 @@ class HomeboundConfig:
         default_factory=lambda: {"close", "stop", "done", "exit", "quit", "kill"}
     )
     default_mode: str = "task"
+    # Multi-runtime pools: maps pool name → RuntimeConfig.
+    # When present, each pool gets its own label prefix (e.g., "Claude1", "Codex2").
+    # When empty, falls back to single-runtime mode using `runtime` + `sessions.agent_label`.
+    runtimes: dict[str, RuntimeConfig] = field(default_factory=dict)
 
     # Derived properties
     @property
@@ -268,11 +302,32 @@ class HomeboundConfig:
         return self.sessions.agent_label
 
     @property
+    def is_multi_runtime(self) -> bool:
+        """True when named runtime pools are configured (one or more)."""
+        return bool(self.runtimes)
+
+    @property
+    def pool_names(self) -> list[str]:
+        """Sorted list of configured pool names."""
+        return sorted(self.runtimes.keys()) if self.runtimes else [self.agent_label.lower()]
+
+    @property
+    def default_pool(self) -> str:
+        """The default pool name (first alphabetically, or agent_label in single-runtime)."""
+        if self.runtimes:
+            return sorted(self.runtimes.keys())[0]
+        return self.agent_label.lower()
+
+    @property
     def ignored_prefixes(self) -> list[str]:
         """All prefixes to ignore when polling (prevents re-routing loops)."""
         base = [self.name, self.sessions.session_prefix, self.sessions.agent_label]
         base.extend(self.orchestrator.aliases)
         base.extend(self.transport.ignored_prefixes)
+        # Add all pool names as ignored prefixes in multi-runtime mode
+        for pool in self.pool_names:
+            label = pool.capitalize()
+            base.extend([label, label.lower(), f"{label.lower()}-"])
         return base
 
     @property
@@ -282,9 +337,24 @@ class HomeboundConfig:
         name_group = "|".join(names)
         return self.tracker.admin_pattern.format(name=f"(?:{name_group})")
 
+    def pool_label(self, pool_name: str) -> str:
+        """User-facing label prefix for a pool (e.g., 'claude' → 'Claude')."""
+        if not self.runtimes:
+            return self.agent_label
+        return pool_name.capitalize()
+
+    def pool_window_prefix(self, pool_name: str) -> str:
+        """Tmux window prefix for a pool (e.g., 'claude' → 'CLAUDE-')."""
+        return f"{self.pool_label(pool_name).upper()}-"
+
+    def pool_session_prefix(self, pool_name: str) -> str:
+        """Transport session prefix for a pool (e.g., 'claude' → 'claude-')."""
+        return f"{pool_name.lower()}-"
+
     def __post_init__(self):
         # Adapter instance caches (not dataclass fields)
         self._runtime_instance = None
+        self._runtime_instances: dict[str, object] = {}
         self._transport_instance = None
         self._tracker_instance = None
 
@@ -307,13 +377,7 @@ class HomeboundConfig:
                     "question to Slack and then wait. Do NOT just sit at the prompt. "
                     "3. Post progress updates to Slack as you complete each step. "
                     "4. Post detailed results to the GitHub issue when done. "
-                    "SLACK FORMATTING (mandatory): "
-                    "Format all Slack messages using Slack mrkdwn syntax for readability: "
-                    "use *bold* for headings and key terms, _italic_ for emphasis, "
-                    "`code` for values/commands, ```code blocks``` for multi-line output, "
-                    "bullet lists with • or -, and > for blockquotes. "
-                    "Structure responses with clear sections and line breaks. "
-                    "Never post walls of unformatted text. "
+                    + _SLACK_FORMATTING_RULES +
                     "Slack command: {post_command} . "
                     "GitHub command: gh issue comment {item_id} --body 'your results' ."
                 ),
@@ -323,13 +387,7 @@ class HomeboundConfig:
                 prompt_template=(
                     "You are handling {work_item_label}. "
                     "--- BEGIN TASK --- {task_text} --- END TASK --- "
-                    "SLACK FORMATTING (mandatory): "
-                    "Format all Slack messages using Slack mrkdwn syntax for readability: "
-                    "use *bold* for headings and key terms, _italic_ for emphasis, "
-                    "`code` for values/commands, ```code blocks``` for multi-line output, "
-                    "bullet lists with • or -, and > for blockquotes. "
-                    "Structure responses with clear sections and line breaks. "
-                    "Never post walls of unformatted text. "
+                    + _SLACK_FORMATTING_RULES +
                     "Post your results to Slack when done: {post_command}"
                 ),
             ),
@@ -337,8 +395,16 @@ class HomeboundConfig:
         for key, val in default_modes.items():
             self.modes.setdefault(key, val)
 
-    def get_runtime(self):
-        """Create or return cached runtime instance from configuration."""
+    def get_runtime(self, pool_name: str | None = None):
+        """Create or return cached runtime instance.
+
+        Args:
+            pool_name: Pool name to look up. If None, uses the default pool
+                (backward-compatible single-runtime path).
+        """
+        if pool_name is not None and pool_name in self.runtimes:
+            return self.get_runtime_for_pool(pool_name)
+
         if self._runtime_instance is not None:
             return self._runtime_instance
 
@@ -353,6 +419,34 @@ class HomeboundConfig:
 
         self._runtime_instance = runtime_cls.from_config(self.runtime)
         return self._runtime_instance
+
+    def get_runtime_for_pool(self, pool_name: str):
+        """Create or return cached runtime instance for a named pool.
+
+        Raises ValueError if pool_name is not in self.runtimes.
+        """
+        if pool_name in self._runtime_instances:
+            return self._runtime_instances[pool_name]
+
+        runtime_config = self.runtimes.get(pool_name)
+        if runtime_config is None:
+            raise ValueError(
+                f"Unknown runtime pool: {pool_name!r}. "
+                f"Available: {', '.join(self.runtimes.keys())}"
+            )
+
+        from homebound.runtimes import RUNTIME_REGISTRY
+
+        runtime_cls = RUNTIME_REGISTRY.get(runtime_config.type)
+        if runtime_cls is None:
+            raise ValueError(
+                f"Unknown runtime type for pool {pool_name!r}: {runtime_config.type}. "
+                f"Available: {', '.join(RUNTIME_REGISTRY.keys())}"
+            )
+
+        instance = runtime_cls.from_config(runtime_config)
+        self._runtime_instances[pool_name] = instance
+        return instance
 
     def get_transport(self):
         """Create or return cached transport instance from configuration."""
@@ -432,6 +526,21 @@ def _parse_config(raw: dict) -> HomeboundConfig:
     routing = _build_dataclass(RoutingConfig, raw.get("routing", {}))
     security = _build_dataclass(SecurityConfig, raw.get("security", {}))
 
+    # Parse named runtimes (multi-model pools).
+    # If `runtimes:` (plural) is present, use it; otherwise fall back to
+    # wrapping `runtime:` (singular) into a single-entry dict keyed by agent_label.
+    runtimes: dict[str, RuntimeConfig] = {}
+    runtimes_raw = raw.get("runtimes", {})
+    if runtimes_raw and isinstance(runtimes_raw, dict):
+        for pool_name, pool_data in runtimes_raw.items():
+            if not isinstance(pool_data, dict):
+                continue
+            if not pool_name.isalpha():
+                raise ValueError(
+                    f"Runtime pool name must be alphabetic, got: {pool_name!r}"
+                )
+            runtimes[pool_name.lower()] = _build_dataclass(RuntimeConfig, pool_data)
+
     # Parse modes (dict of ModeConfig, not a flat dataclass)
     modes_raw = raw.get("modes", {})
     default_mode = modes_raw.get("default", "task")
@@ -454,6 +563,7 @@ def _parse_config(raw: dict) -> HomeboundConfig:
         modes=modes if modes else {},  # Let __post_init__ fill defaults if empty
         security=security,
         default_mode=default_mode,
+        runtimes=runtimes,
     )
 
     if "close_commands" in raw:

@@ -9,9 +9,11 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from datetime import datetime
 
 from homebound.config import HomeboundConfig
-from homebound.session import ChildInfo, extract_keywords, read_child_output
+from homebound.session import ChildInfo, _item_label as session_item_label, extract_keywords, read_child_output
+from homebound.tmux import output_has_prompt
 
 logger = logging.getLogger("homebound")
 
@@ -69,7 +71,66 @@ class RoutingEngine:
     # ------------------------------------------------------------------
 
     def _item_label(self, item_id: int) -> str:
-        return f"{self.config.sessions.agent_label}{item_id}"
+        child = self.children.get(item_id)
+        pn = child.pool_name if child else ""
+        return session_item_label(self.config, item_id, pn)
+
+    # ------------------------------------------------------------------
+    # Busy detection
+    # ------------------------------------------------------------------
+
+    async def is_busy(self, item_id: int) -> bool:
+        """Check if an agent is currently busy (not idle at prompt).
+
+        Uses a two-tier check:
+        1. Fast: last_message_at recency (in-memory, no I/O)
+        2. Optional: tmux idle marker check (async I/O, when busy_check_tmux=True)
+
+        Returns True if the agent appears to be actively processing.
+        """
+        child = self.children.get(item_id)
+        if child is None:
+            return False
+
+        recency = self.config.routing.busy_recency_seconds
+        if recency <= 0:
+            return False
+
+        elapsed = (datetime.now() - child.last_message_at).total_seconds()
+
+        if elapsed < recency:
+            logger.debug(
+                "is_busy(%s): busy (recency %.1fs < %ds)",
+                self._item_label(item_id), elapsed, recency,
+            )
+            return True
+
+        if not self.config.routing.busy_check_tmux:
+            return False
+
+        # Slow path: check tmux for idle prompt markers
+        try:
+            output = await read_child_output(child, self.config, lines=5)
+            runtime = self.config.get_runtime(child.pool_name)
+            markers = runtime.idle_prompt_markers()
+            at_prompt = output_has_prompt(output, markers, scan_lines=3)
+            if at_prompt:
+                logger.debug(
+                    "is_busy(%s): idle (prompt marker found)",
+                    self._item_label(item_id),
+                )
+                return False
+            logger.debug(
+                "is_busy(%s): busy (no prompt marker)",
+                self._item_label(item_id),
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "is_busy(%s): tmux check failed: %s",
+                self._item_label(item_id), e,
+            )
+            return False  # Fail open
 
     # ------------------------------------------------------------------
     # Thread routing
@@ -223,11 +284,12 @@ class RoutingEngine:
             context_lines.append(f"[{sender_label}] {msg_text}")
         context_block = "\n".join(context_lines) if context_lines else "(no recent messages)"
 
+        example_label = next(iter(id_map.keys()), f"{self.config.sessions.agent_label}1")
         prompt = (
             "You are a strict message router. Given the recent conversation and active sessions, "
             "decide if the NEW message is a follow-up to an existing session.\n\n"
             "Rules:\n"
-            f"- Respond with ONLY the session label (e.g. {self.config.sessions.agent_label}1) if the new message clearly continues that session's topic\n"
+            f"- Respond with ONLY the session label (e.g. {example_label}) if the new message clearly continues that session's topic\n"
             "- Respond NONE if it is a new or unrelated topic\n"
             "- Respond NONE if unsure\n"
             "- Default to NONE — only match when confident\n\n"
@@ -254,10 +316,21 @@ class RoutingEngine:
                 # Try exact match first, then extract first token
                 matched_id = id_map.get(answer)
                 if matched_id is None:
-                    label_lower = re.escape(self.config.sessions.agent_label.lower())
-                    first_token = re.match(rf"({label_lower}\d+)", answer)
-                    if first_token:
-                        matched_id = id_map.get(first_token.group(1))
+                    # Try pool labels in multi-runtime mode
+                    if self.config.runtimes:
+                        for pool in self.config.pool_names:
+                            pl = re.escape(self.config.pool_label(pool).lower())
+                            first_token = re.match(rf"({pl}\d+)", answer)
+                            if first_token:
+                                matched_id = id_map.get(first_token.group(1))
+                                if matched_id is not None:
+                                    break
+                    # Fall back to agent_label
+                    if matched_id is None:
+                        label_lower = re.escape(self.config.sessions.agent_label.lower())
+                        first_token = re.match(rf"({label_lower}\d+)", answer)
+                        if first_token:
+                            matched_id = id_map.get(first_token.group(1))
             logger.debug("LLM routing: answer=%r → item_id=%s", answer, matched_id)
             if matched_id is None:
                 return None

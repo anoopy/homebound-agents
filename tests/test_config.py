@@ -322,3 +322,33 @@ class TestYAMLLoading:
         }
         with pytest.raises(ValueError, match="option_patterns\\[0\\] is not a valid regex"):
             _parse_config(raw)
+
+
+class TestErrorPatterns:
+    """Verify API error pattern configuration."""
+
+    def test_default_error_patterns_exist(self):
+        config = HomeboundConfig()
+        assert len(config.sessions.error_patterns) > 0
+        # Each pattern should be a valid regex
+        for p in config.sessions.error_patterns:
+            re.compile(p)
+
+    def test_default_error_scan_lines(self):
+        config = HomeboundConfig()
+        assert config.sessions.error_scan_lines == 20
+
+    def test_yaml_override_error_patterns(self):
+        raw = {
+            "sessions": {
+                "error_patterns": [r"(?i)my_custom_error"],
+                "error_scan_lines": 50,
+            }
+        }
+        config = _parse_config(raw)
+        assert config.sessions.error_patterns == [r"(?i)my_custom_error"]
+        assert config.sessions.error_scan_lines == 50
+
+    def test_invalid_error_pattern_raises(self):
+        with pytest.raises(ValueError, match="error_patterns\\[0\\] is not a valid regex"):
+            SessionsConfig(error_patterns=["("])

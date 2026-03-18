@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from homebound.adapters.tracker import CommandLevel
@@ -178,8 +179,6 @@ class AdminCommandHandler:
 
     async def report_sessions(self) -> None:
         """Report status of all active child sessions."""
-        from datetime import datetime
-
         max_children = self.config.sessions.max_concurrent
         active = {n: c for n, c in self.children.items() if c is not None}
         total = len(active)
@@ -188,6 +187,14 @@ class AdminCommandHandler:
             return
 
         lines = [f":clipboard: *Active sessions* (`{total}/{max_children}`):"]
+        # Show pool summary in multi-runtime mode
+        if self.config.is_multi_runtime:
+            pool_counts: dict[str, int] = {}
+            for c in active.values():
+                pn = c.pool_name or "default"
+                pool_counts[pn] = pool_counts.get(pn, 0) + 1
+            pool_summary = ", ".join(f"{p}: {n}" for p, n in sorted(pool_counts.items()))
+            lines.append(f"Pools: {pool_summary}")
         now = datetime.now()
         for item_id, child in sorted(active.items()):
             uptime_secs = (now - child.started_at).total_seconds()
@@ -242,20 +249,47 @@ class AdminCommandHandler:
         """Post available admin commands."""
         aliases = [self.config.name] + self.config.orchestrator.aliases
         short = aliases[-1] if len(aliases) > 1 else aliases[0]
-        agent = self.config.sessions.agent_label
+
+        # Build session command examples based on configured pools
+        if self.config.is_multi_runtime:
+            pool_examples = []
+            for pool in self.config.pool_names:
+                lbl = self.config.pool_label(pool)
+                pool_examples.append(
+                    f">`@{lbl} <task>` — spawn `{pool}` session in next free slot\n"
+                    f">`@{lbl}1 <task>` — route to specific `{pool}` slot\n"
+                    f">`@{lbl}1 close` — close session\n"
+                    f">`{lbl}1 ans <value>` — answer runtime prompt"
+                )
+            session_lines = "\n".join(pool_examples)
+            pools_note = (
+                "\n\n*Pools:* "
+                + ", ".join(
+                    f"`{p}` ({self.config.runtimes[p].type})"
+                    for p in self.config.pool_names
+                )
+            )
+        else:
+            agent = self.config.sessions.agent_label
+            session_lines = (
+                f">`@{agent} <task>` — spawn or route to next free slot\n"
+                f">`@{agent}1 <task>` — route to specific slot (any number)\n"
+                f">`@{agent}1 close` — close session\n"
+                f">`{agent}1 ans <value>` — answer runtime prompt"
+            )
+            pools_note = ""
+
         await self._post(
             ":information_source: *Commands*\n\n"
             "*Sessions*\n"
             ">`<text>` — smart-routed to matching session or new slot\n"
-            f">`@{agent} <task>` — spawn or route to next free slot\n"
-            f">`@{agent}1 <task>` — route to specific slot (any number)\n"
-            f">`@{agent}1 close` — close session\n"
-            f">`{agent}1 ans <value>` — answer runtime prompt\n\n"
+            f"{session_lines}\n\n"
             "*Admin*\n"
             f">`status` or `@{short} status` — list sessions\n"
             f">`help` or `@{short} help` — this help\n"
             f">`@{short} skills` — list available skills\n"
             f">`@{short} <N>?` — issue status"
+            f"{pools_note}"
         )
 
     async def post_admin_skills(self) -> None:

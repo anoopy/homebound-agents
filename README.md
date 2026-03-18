@@ -2,14 +2,16 @@
 
 **Command your local AI agents from anywhere.**
 
-A Python orchestrator that lets you control AI coding agents running on your local machine via Slack. Send commands from anywhere, and homebound routes them to Claude Code sessions managed in tmux — with smart routing, multi-agent parallelism, and crash recovery.
+A Python orchestrator that lets you control AI coding agents running on your local machine via Slack. Send commands from anywhere, and homebound routes them to agent sessions managed in tmux — with smart routing, multi-model support, multi-agent parallelism, and crash recovery.
 
 ```
-You (Slack)  ──→  Homebound (orchestrator)  ──→  Claude Code (tmux window)
+You (Slack)  ──→  Homebound (orchestrator)  ──→  Claude Code (tmux CLAUDE-1)
+                         │                  ──→  Codex CLI   (tmux CODEX-2)
                          │                              │
                          ├── smart-routes messages      ├── works on GH issues
                          ├── manages session pool       ├── reads/writes code
-                         └── reports status             └── posts results
+                         ├── multi-model pools          └── posts results
+                         └── reports status
 ```
 
 ## Why Homebound?
@@ -21,6 +23,7 @@ Sessions survive network drops and orchestrator restarts, and everything is obse
 ## Features
 
 - **Smart routing** — with `ANTHROPIC_API_KEY` set and `llm_routing: true`, bare messages are automatically classified by Claude Haiku to the right session. No `@Agent1` prefixes needed — just type naturally and homebound figures out which agent should handle it.
+- **Multi-model pools** — run Claude Code and Codex (or any CLI) simultaneously with named pools (`@Claude1`, `@Codex1`), sharing a single slot pool
 - **Multi-session** — up to N concurrent agents in tmux, addressed via `@Agent` or `@Agent1` (configurable via `sessions.agent_label`)
 - **Crash recovery** — state persistence (`children.json`), orphan re-adoption on restart
 - **GitHub integration** — list, create, view, and close issues directly from Slack
@@ -64,7 +67,7 @@ Sessions survive network drops and orchestrator restarts, and everything is obse
 
 ```bash
 git clone https://github.com/anoopy/homebound-agents
-cd homebound-agents
+cd homebound
 python3 -m venv venv   # Must be Python 3.10+; use python3.13 if python3 is older
 source venv/bin/activate
 pip install --upgrade pip
@@ -98,9 +101,20 @@ tracker:
   type: "github"
   project_dir: "."  # Current directory; agents work in the repo you start from
 
+# Single runtime (default):
 runtime:
   type: "claude-code"
   command: "claude"
+
+# Multi-runtime pools (optional — replaces `runtime:` above):
+# runtimes:
+#   claude:
+#     type: "claude-code"
+#     command: "claude --dangerously-skip-permissions"
+#   codex:
+#     type: "generic"
+#     command: "codex --no-alt-screen --full-auto"
+#     idle_markers: ["›"]
 
 routing:
   llm_routing: true  # Recommended — requires ANTHROPIC_API_KEY
@@ -136,6 +150,11 @@ scripts/homeboundctl.sh start --config homebound.yaml
 @Agent fix the login bug for #42             → spawn agent on issue #42
 what about the auth middleware?               → smart-routed to the right agent (llm_routing: true)
 @Agent1 close                                → close session 1
+
+# Multi-model pools (when runtimes: is configured):
+@Claude fix the login bug                    → spawn Claude Code session
+@Codex refactor the utils module             → spawn Codex session
+@Claude1 close                               → close specific Claude session
 ```
 
 ## Architecture
@@ -156,7 +175,7 @@ HomeboundConfig (YAML) ──→ Orchestrator
 ```
 
 - **Transport** — Slack built-in; extensible to Discord, Telegram, etc.
-- **Runtime** — Claude Code built-in (tested); [Codex CLI](examples/codex.yaml) and other CLIs via `GenericCLIRuntime` (untested — should work but not fully validated)
+- **Runtime** — Claude Code and Codex CLI built-in (tested); other CLIs via `GenericCLIRuntime`. Multiple runtimes can run simultaneously via named pools.
 - **Tracker** — GitHub Issues built-in; extensible to Linear, Jira, etc.
 
 ### Routing cascade
@@ -173,7 +192,7 @@ Incoming Slack message
 
 Without LLM routing, step 2 (keyword matching) still runs before falling through to auto-spawn. With LLM routing enabled, Haiku reads the message along with recent conversation context (last 5 messages) and each session's keywords, then routes to the best match (~200-500ms per classification). This is the difference between "every bare message spawns a new agent" and "messages intelligently reach the right agent."
 
-> **Note:** Agent names are configurable via `sessions.agent_label`. Set it to `"Claude"`, `"Bot"`, or any alphabetic name. Labels, tmux windows, Slack commands, and all internal naming derive from this single field.
+> **Note:** In single-runtime mode, agent names are configurable via `sessions.agent_label`. In multi-runtime mode, names derive from the pool keys in `runtimes:` (e.g., `claude` → `@Claude1`).
 
 Adding a new adapter is straightforward: implement the ABC, add a `from_config` classmethod, and register it in the adapter registry.
 
@@ -186,8 +205,9 @@ Run `homebound init` to generate a complete starter config. Key sections:
 | `orchestrator` | Name, aliases |
 | `transport` | Slack channel, token, polling |
 | `tracker` | GitHub project dir, admin pattern |
-| `runtime` | Agent CLI command, idle markers |
-| `sessions` | Agent label, max concurrent, timeouts, retries |
+| `runtime` | Agent CLI command, idle markers (single-runtime mode) |
+| `runtimes` | Named runtime pools for multi-model support (replaces `runtime`) |
+| `sessions` | Max concurrent, timeouts, retries |
 | `routing` | Thread routing, LLM routing, auto-spawn |
 | `prompt_relay` | Detect and relay CLI prompts to Slack |
 | `modes` | Chat prompt templates |
@@ -237,11 +257,43 @@ All configuration lives in `homebound.yaml`. Run `homebound init` to generate a 
 | `idle_markers` | `["❯", "> "]` | Strings that indicate the CLI is idle |
 | `exit_command` | `"/exit"` | Command to gracefully exit the agent |
 
+### `runtimes` (multi-model pools)
+
+When present, `runtimes:` replaces the top-level `runtime:` key. Each entry defines a named pool with its own CLI backend. All pools share the same slot pool (`sessions.max_concurrent`).
+
+```yaml
+runtimes:
+  claude:
+    type: "claude-code"
+    command: "claude --dangerously-skip-permissions"
+    idle_markers: ["❯", "> "]
+    exit_command: "/exit"
+    env_unset: ["CLAUDECODE"]
+  codex:
+    type: "generic"
+    command: "codex --no-alt-screen --full-auto"
+    idle_markers: ["›"]
+    exit_command: "/exit"
+    env_unset: []
+```
+
+| Behavior | Single `runtime:` | Multi `runtimes:` |
+|----------|-------------------|-------------------|
+| Session labels | `Agent1`, `Agent2` | `Claude1`, `Codex2` |
+| tmux windows | `AGENT-1` | `CLAUDE-1`, `CODEX-2` |
+| Slack commands | `@Agent <task>` | `@Claude <task>`, `@Codex <task>` |
+| Slot pool | Shared | Shared |
+| Help text | Generic | Per-pool commands |
+
+Pool names must be alphabetic. Each pool entry has the same fields as `runtime:` (`type`, `command`, `idle_markers`, `exit_command`, `env_unset`).
+
+> **Codex note:** On first run, Codex shows a "trust this folder" prompt that must be accepted manually once via `scripts/homeboundctl.sh attach`. After that, Codex starts cleanly for all subsequent spawns.
+
 ### `sessions`
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `agent_label` | `"Agent"` | User-facing name — labels become `Agent1`, windows `AGENT-1`, Slack commands `@Agent1`. Set to `"Claude"`, `"Bot"`, etc. for custom naming. |
+| `agent_label` | `"Agent"` | User-facing name in single-runtime mode — labels become `Agent1`, windows `AGENT-1`, Slack commands `@Agent1`. Ignored when `runtimes:` is configured (pool names determine labels). |
 | `max_concurrent` | `5` | Maximum parallel agent sessions |
 | `idle_timeout` | `1800` | Seconds before idle detection (30 min) |
 | `init_timeout` | `60` | Seconds to wait for agent prompt after spawn |
@@ -330,7 +382,7 @@ The script auto-sources `.env` from the repo root, injecting `SLACK_BOT_TOKEN` a
 
 ```bash
 git clone https://github.com/anoopy/homebound-agents
-cd homebound-agents
+cd homebound
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
@@ -367,7 +419,7 @@ src/homebound/
   trackers/              # Tracker implementations
     github.py
 
-tests/                   # 296 tests across all modules
+tests/                   # 371 tests across all modules
 scripts/
   homeboundctl.sh        # tmux session manager
   watchdog.sh            # Auto-restart watchdog

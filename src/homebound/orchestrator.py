@@ -24,6 +24,7 @@ from homebound.routing import RoutingEngine
 from homebound.security import CommandAction, CommandPolicy, Principal
 from homebound.session import (
     ChildInfo,
+    _item_label as session_item_label,
     adopt_child,
     close_child,
     extract_keywords,
@@ -32,7 +33,7 @@ from homebound.session import (
     send_to_child,
     spawn_child,
 )
-from homebound.tmux import list_windows as tmux_list_windows
+from homebound.tmux import list_windows as tmux_list_windows, output_has_prompt
 
 logger = logging.getLogger("homebound")
 
@@ -112,6 +113,9 @@ class Orchestrator:
         self._spawn_tasks: set[asyncio.Task] = set()
         self._consecutive_poll_failures: int = 0
         self._outage_start_time: float | None = None
+        self._error_patterns: list[re.Pattern] = [
+            re.compile(p) for p in config.sessions.error_patterns
+        ]
 
     @property
     def command_policy(self) -> CommandPolicy:
@@ -160,6 +164,7 @@ class Orchestrator:
                 "recent_keywords": child.recent_keywords,
                 "posted_message_ts": child.posted_message_ts[-50:],
                 "github_issue_id": child.github_issue_id,
+                "pool_name": child.pool_name,
             }
         try:
             tmp = self._state_file.with_suffix(".tmp")
@@ -179,13 +184,14 @@ class Orchestrator:
             result = {}
             for k, v in children_data.items():
                 entry: dict = {
-                    "started_at": datetime.fromisoformat(v["started_at"]),
-                    "last_message_at": datetime.fromisoformat(v["last_message_at"]),
-                    "owner_user_id": v["owner_user_id"],
-                    "topic_summary": v["topic_summary"],
-                    "recent_keywords": v["recent_keywords"],
-                    "posted_message_ts": v["posted_message_ts"],
+                    "started_at": datetime.fromisoformat(v.get("started_at", "2000-01-01T00:00:00")),
+                    "last_message_at": datetime.fromisoformat(v.get("last_message_at", "2000-01-01T00:00:00")),
+                    "owner_user_id": v.get("owner_user_id", ""),
+                    "topic_summary": v.get("topic_summary", ""),
+                    "recent_keywords": v.get("recent_keywords", []),
+                    "posted_message_ts": v.get("posted_message_ts", []),
                     "github_issue_id": v.get("github_issue_id"),
+                    "pool_name": v.get("pool_name", ""),
                 }
                 result[int(k)] = entry
             return result
@@ -220,31 +226,69 @@ class Orchestrator:
     def _normalize_command_text(command_text: str) -> str:
         return " ".join(command_text.strip().lower().split())
 
-    def _item_label(self, item_id: int) -> str:
-        return f"{self.config.sessions.agent_label}{item_id}"
+    def _item_label(self, item_id: int, pool_name: str = "") -> str:
+        child = self.children.get(item_id)
+        pn = pool_name or (child.pool_name if child else "")
+        return session_item_label(self.config, item_id, pn)
 
-    def _resolve_label_to_item_id(self, label: str) -> int | None:
-        """Resolve a user-facing label (e.g. Agent1, Agent 1, or raw int) to a slot number."""
+    def _resolve_label_to_item_id(self, label: str) -> tuple[int | None, str]:
+        """Resolve a user-facing label to (slot, pool_name).
+
+        Handles: Agent1, Claude1, Codex 2, or raw int.
+        Returns (None, "") if not matching.
+        """
+        # Try each pool label (multi-runtime)
+        if self.config.runtimes:
+            for pool in self.config.pool_names:
+                pool_label = self.config.pool_label(pool)
+                m = re.fullmatch(rf"(?:{re.escape(pool_label)})\s*(\d+)", label.strip(), re.IGNORECASE)
+                if m:
+                    return int(m.group(1)), pool
+
+        # Single-runtime label
         dev_match = re.fullmatch(rf"(?:{re.escape(self.config.sessions.agent_label)})\s*(\d+)", label.strip(), re.IGNORECASE)
         if dev_match:
-            return int(dev_match.group(1))
+            return int(dev_match.group(1)), ""
         try:
-            return int(label.strip())
+            return int(label.strip()), ""
         except ValueError:
-            return None
+            return None, ""
 
     def _status_hint(self, item_id: int) -> str:
         return f"Use `@{self.config.name} status` to inspect progress."
 
     def _parse_role_command(self, text: str) -> tuple[str, int | None, str] | None:
-        match = re.match(rf"^@({re.escape(self.config.sessions.agent_label)})\s*(\d+)?\s+(.+)$", text.strip(), re.IGNORECASE)
+        """Parse @<pool><N> <payload> commands.
+
+        In multi-runtime mode, matches any pool name (e.g., @Claude1, @Codex).
+        In single-runtime mode, matches the agent_label (e.g., @Agent1).
+
+        Returns (pool_name, slot, payload) or None.
+        """
+        # Build label alternatives: pool labels + agent_label
+        labels = []
+        if self.config.runtimes:
+            for pool in self.config.pool_names:
+                labels.append(re.escape(self.config.pool_label(pool)))
+        labels.append(re.escape(self.config.sessions.agent_label))
+        label_group = "|".join(labels)
+
+        match = re.match(rf"^@({label_group})\s*(\d+)?\s+(.+)$", text.strip(), re.IGNORECASE)
         if not match:
             return None
-        role = match.group(1).lower()
+        matched_label = match.group(1).lower()
         slot_raw = match.group(2)
         payload = match.group(3).strip()
         slot = int(slot_raw) if slot_raw else None
-        return role, slot, payload
+
+        # Resolve matched label to pool name
+        pool_name = ""
+        if self.config.runtimes:
+            for pool in self.config.pool_names:
+                if self.config.pool_label(pool).lower() == matched_label:
+                    pool_name = pool
+                    break
+        return pool_name, slot, payload
 
     @staticmethod
     def _strip_client_signature(text: str) -> str:
@@ -296,6 +340,14 @@ class Orchestrator:
         logger.info("%s: startup signal observed from %s", self._item_label(item_id), source)
 
     def _extract_item_id_from_agent_message(self, text: str) -> int | None:
+        # Check multi-runtime pool prefixes
+        if self.config.runtimes:
+            for pool in self.config.pool_names:
+                prefix = re.escape(self.config.pool_session_prefix(pool).rstrip("-"))
+                m = re.search(rf"\[{prefix}-?(\d+)\b", text, re.IGNORECASE)
+                if m:
+                    return int(m.group(1))
+        # Single-runtime prefix
         prefix = re.escape(self.config.sessions.session_prefix.rstrip("-"))
         dev_match = re.search(rf"\[{prefix}-?(\d+)\b", text, re.IGNORECASE)
         if dev_match:
@@ -485,6 +537,11 @@ class Orchestrator:
 
         parts = [f":large_green_circle: *{self.config.name} online*"]
         parts.append(f"Max {self.max_children} concurrent sessions | Polling every {self.poll_interval}s")
+        if self.config.is_multi_runtime:
+            pool_info = ", ".join(
+                f"`{p}` ({self.config.runtimes[p].type})" for p in self.config.pool_names
+            )
+            parts.append(f":gear: Pools: {pool_info}")
         if adopted:
             parts.append(f":recycle: Re-adopted {len(adopted)} session(s): {', '.join(adopted)}")
         if self.config.security.allowed_users:
@@ -605,11 +662,16 @@ class Orchestrator:
                 )
                 continue
 
+            # Build prompt answer pattern for all pool labels + agent_label
+            ans_labels = [re.escape(self.config.sessions.agent_label)]
+            if self.config.runtimes:
+                ans_labels.extend(re.escape(self.config.pool_label(p)) for p in self.config.pool_names)
+            ans_label_group = "|".join(ans_labels)
             prompt_answer_match = re.search(
-                rf"^((?:{re.escape(self.config.sessions.agent_label)})?\s*\d+)\s+ans\s+(.+)$", stripped, re.IGNORECASE,
+                rf"^((?:{ans_label_group})?\s*\d+)\s+ans\s+(.+)$", stripped, re.IGNORECASE,
             )
             if prompt_answer_match:
-                resolved = self._resolve_label_to_item_id(prompt_answer_match.group(1))
+                resolved, _ = self._resolve_label_to_item_id(prompt_answer_match.group(1))
                 if resolved is not None:
                     await self._prompt_relay.handle_prompt_answer(
                         resolved,
@@ -619,27 +681,67 @@ class Orchestrator:
                     )
                     continue
 
-            # @<agent_label> command handling
+            # @<pool_label> command handling (e.g., @Claude1, @Codex, @Agent1)
             role_command = self._parse_role_command(stripped)
+            # Track pool_name for auto-spawn if it falls through to Tier 4
+            msg_pool_name = ""
             if role_command:
-                role, slot, payload = role_command
+                pool, slot, payload = role_command
+                msg_pool_name = pool
                 if slot is not None:
-                    # @Agent1 <task> — route to specific slot
+                    # @Claude1 <task> — route to specific slot
                     if slot < 1 or slot > self.max_children:
                         await self._post(f"Slot must be between 1 and {self.max_children}.")
                         continue
                     await self._handle_issue_message(
                         slot, payload, sender_user_id=sender_id, sender_extra=msg.extra,
+                        pool_name=pool,
                     )
                     continue
                 else:
-                    # @Agent <task> — use stripped payload, fall through to Tier 2-4 cascade
+                    # @Claude <task> (no slot number) — if a specific pool was
+                    # requested, skip Tiers 2-3 and go directly to auto-spawn
+                    # on that pool. Otherwise fall through to the full cascade.
                     stripped = payload
+                    if msg_pool_name:
+                        if self.config.routing.auto_spawn_on_no_match:
+                            slot = self._router.next_free_slot()
+                            if slot is not None:
+                                await self._handle_issue_message(
+                                    slot, stripped,
+                                    sender_user_id=sender_id, sender_extra=msg.extra,
+                                    pool_name=msg_pool_name,
+                                )
+                            else:
+                                await self._post(
+                                    f":no_entry_sign: At capacity "
+                                    f"(`{len(self.children)}/{self.max_children}`). "
+                                    f"Please resend when a slot opens."
+                                )
+                        else:
+                            pool_lbl = self.config.pool_label(msg_pool_name)
+                            await self._post(
+                                f":information_source: Use `@{pool_lbl}<N> <task>` "
+                                f"to target a specific slot (auto-spawn is disabled)."
+                            )
+                        continue
 
-            bare_role_match = re.match(rf"^@({re.escape(self.config.sessions.agent_label)})\s*\d*$", stripped, re.IGNORECASE)
+            # Bare role match (e.g., "@Agent", "@Claude" with no payload)
+            label_alts = [re.escape(self.config.sessions.agent_label)]
+            if self.config.runtimes:
+                label_alts.extend(re.escape(self.config.pool_label(p)) for p in self.config.pool_names)
+            bare_pattern = rf"^@({'|'.join(label_alts)})\s*\d*$"
+            bare_role_match = re.match(bare_pattern, stripped, re.IGNORECASE)
             if bare_role_match:
-                al = self.config.sessions.agent_label
-                await self._post(f"Usage: `@{al} <task>` or `@{al}1 <task>` to target a specific slot.")
+                examples = []
+                if self.config.runtimes:
+                    for p in self.config.pool_names[:2]:
+                        lbl = self.config.pool_label(p)
+                        examples.append(f"`@{lbl} <task>` or `@{lbl}1 <task>`")
+                else:
+                    al = self.config.sessions.agent_label
+                    examples.append(f"`@{al} <task>` or `@{al}1 <task>`")
+                await self._post(f"Usage: {' | '.join(examples)} to target a specific slot.")
                 continue
 
             if not stripped:
@@ -658,6 +760,32 @@ class Orchestrator:
             if self.config.routing.thread_routing:
                 thread_item_id = self._router.route_by_thread(msg)
                 if thread_item_id is not None:
+                    # Busy guard: if matched agent is busy, skip to Tier 4 (auto-spawn).
+                    # Thread replies have strong intent — don't let them leak into
+                    # keyword/LLM matching which could misdirect to an unrelated agent.
+                    if await self._router.is_busy(thread_item_id):
+                        label = self._item_label(thread_item_id)
+                        logger.info("Thread match %s is busy, skipping to auto-spawn", label)
+                        # Jump directly to Tier 4
+                        spawned = False
+                        if self.config.routing.auto_spawn_on_no_match:
+                            slot = self._router.next_free_slot()
+                            if slot is not None:
+                                # Use the busy child's pool for the new spawn
+                                busy_child = self.children.get(thread_item_id)
+                                spawn_pool = busy_child.pool_name if busy_child else msg_pool_name
+                                await self._handle_issue_message(
+                                    slot, stripped,
+                                    sender_user_id=sender_id, sender_extra=msg.extra,
+                                    pool_name=spawn_pool,
+                                )
+                                spawned = True
+                        if not spawned:
+                            await self._post(
+                                f":hourglass: *{label}* is busy and no free slots available. "
+                                f"Please resend when a slot opens.",
+                            )
+                        continue
                     child = self.children[thread_item_id]
                     route_decision = self.command_policy.evaluate(
                         CommandAction.SESSION_ROUTE, principal,
@@ -686,47 +814,63 @@ class Orchestrator:
             if self.config.routing.keyword_routing and self.children:
                 kw_item_id = self._router.match_by_keywords(stripped)
                 if kw_item_id is not None:
-                    child = self.children[kw_item_id]
-                    route_decision = self.command_policy.evaluate(
-                        CommandAction.SESSION_ROUTE, principal,
-                        owner_user_id=child.owner_user_id,
-                    )
-                    if route_decision.allow:
-                        await send_to_child(child, stripped, self.config)
-                        child.idle_warnings = 0
-                        label = self._item_label(kw_item_id)
-                        await self._post(
-                            f":mag: *{label}*: Routed via keyword match",
-                            item_id=kw_item_id,
+                    # Busy guard: if matched agent is busy, fall through to spawn
+                    if await self._router.is_busy(kw_item_id):
+                        logger.info(
+                            "Keyword match %s is busy, falling through",
+                            self._item_label(kw_item_id),
                         )
-                        logger.info("Keyword-routed message to %s", label)
-                        continue
-                    else:
-                        label = self._item_label(kw_item_id)
-                        logger.debug("Keyword route to %s denied for %s", label, sender_id)
+                        kw_item_id = None
+                    if kw_item_id is not None:
+                        child = self.children[kw_item_id]
+                        route_decision = self.command_policy.evaluate(
+                            CommandAction.SESSION_ROUTE, principal,
+                            owner_user_id=child.owner_user_id,
+                        )
+                        if route_decision.allow:
+                            await send_to_child(child, stripped, self.config)
+                            child.idle_warnings = 0
+                            label = self._item_label(kw_item_id)
+                            await self._post(
+                                f":mag: *{label}*: Routed via keyword match",
+                                item_id=kw_item_id,
+                            )
+                            logger.info("Keyword-routed message to %s", label)
+                            continue
+                        else:
+                            label = self._item_label(kw_item_id)
+                            logger.debug("Keyword route to %s denied for %s", label, sender_id)
 
             # Tier 3: LLM-based matching
             if self.config.routing.llm_routing and self.children:
                 llm_item_id = await self._router.match_by_llm(stripped)
                 if llm_item_id is not None:
-                    child = self.children[llm_item_id]
-                    route_decision = self.command_policy.evaluate(
-                        CommandAction.SESSION_ROUTE, principal,
-                        owner_user_id=child.owner_user_id,
-                    )
-                    if route_decision.allow:
-                        await send_to_child(child, stripped, self.config)
-                        child.idle_warnings = 0
-                        label = self._item_label(llm_item_id)
-                        await self._post(
-                            f":dart: *{label}*: Routed via smart match",
-                            item_id=llm_item_id,
+                    # Busy guard: if matched agent is busy, fall through to spawn
+                    if await self._router.is_busy(llm_item_id):
+                        logger.info(
+                            "LLM match %s is busy, falling through",
+                            self._item_label(llm_item_id),
                         )
-                        logger.info("LLM-routed message to %s", label)
-                        continue
-                    else:
-                        label = self._item_label(llm_item_id)
-                        logger.debug("LLM route to %s denied for %s", label, sender_id)
+                        llm_item_id = None
+                    if llm_item_id is not None:
+                        child = self.children[llm_item_id]
+                        route_decision = self.command_policy.evaluate(
+                            CommandAction.SESSION_ROUTE, principal,
+                            owner_user_id=child.owner_user_id,
+                        )
+                        if route_decision.allow:
+                            await send_to_child(child, stripped, self.config)
+                            child.idle_warnings = 0
+                            label = self._item_label(llm_item_id)
+                            await self._post(
+                                f":dart: *{label}*: Routed via smart match",
+                                item_id=llm_item_id,
+                            )
+                            logger.info("LLM-routed message to %s", label)
+                            continue
+                        else:
+                            label = self._item_label(llm_item_id)
+                            logger.debug("LLM route to %s denied for %s", label, sender_id)
 
             # Tier 4: Auto-spawn new session for unmatched messages
             if self.config.routing.auto_spawn_on_no_match:
@@ -735,6 +879,14 @@ class Orchestrator:
                     await self._handle_issue_message(
                         slot, stripped,
                         sender_user_id=sender_id, sender_extra=msg.extra,
+                        pool_name=msg_pool_name,
+                    )
+                    continue
+                else:
+                    await self._post(
+                        f":no_entry_sign: At capacity "
+                        f"(`{len(self.children)}/{self.max_children}`). "
+                        f"Please resend when a slot opens."
                     )
                     continue
 
@@ -745,6 +897,7 @@ class Orchestrator:
 
         # Health-check children even when poll fails.
         await self._health_check()
+        await self._check_api_errors()
         await self._check_startup_visibility()
         await self._prompt_relay.scan_runtime_prompts(self._poll_cycles)
         await self._router.maybe_enrich_session_context()
@@ -760,12 +913,12 @@ class Orchestrator:
 
     async def _handle_issue_message(
         self, item_id: int, task_text: str, sender_user_id: str = "",
-        sender_extra: dict | None = None,
+        sender_extra: dict | None = None, pool_name: str = "",
     ) -> None:
         """Route an item message to an existing child or spawn a new one."""
         max_msg_len = self.config.sessions.max_message_len
         principal = self._principal_from_fields(sender_user_id, sender_extra)
-        label = self._item_label(item_id)
+        label = self._item_label(item_id, pool_name)
 
         # Close commands
         if task_text.strip().lower() in self.config.close_commands:
@@ -801,6 +954,15 @@ class Orchestrator:
             child = self.children[item_id]
             if child is None:
                 logger.info("%s: spawn already in progress, ignoring", label)
+                return
+            # Pool mismatch check: slot is occupied by a different pool
+            if pool_name and pool_name != child.pool_name:
+                existing_label = self._item_label(item_id, child.pool_name)
+                await self._post(
+                    f":warning: Slot {item_id} is running *{existing_label}* "
+                    f"(`{child.pool_name}`), not `{pool_name}`. "
+                    f"Use `@{existing_label}` to message it, or close it first."
+                )
                 return
             route_decision = self.command_policy.evaluate(
                 CommandAction.SESSION_ROUTE, principal, owner_user_id=child.owner_user_id,
@@ -848,21 +1010,22 @@ class Orchestrator:
             # Reserve slot with sentinel
             self.children[item_id] = None
             task = asyncio.create_task(
-                self._do_spawn(item_id, task_text, mode, sender_user_id, label),
+                self._do_spawn(item_id, task_text, mode, sender_user_id, label, pool_name),
                 name=f"spawn-{item_id}",
             )
             self._spawn_tasks.add(task)
             task.add_done_callback(self._on_spawn_done)
-            logger.info("Spawn task created for %s (mode=%s)", label, mode)
+            logger.info("Spawn task created for %s (mode=%s, pool=%s)", label, mode, pool_name or "default")
 
     async def _do_spawn(
         self, item_id: int, task_text: str, mode: str,
-        sender_user_id: str, label: str,
+        sender_user_id: str, label: str, pool_name: str = "",
     ) -> None:
         """Background task: spawn child session. Sentinel already set by caller."""
         try:
             child = await spawn_child(
                 item_id, task_text, config=self.config, mode=mode,
+                pool_name=pool_name,
             )
             child.owner_user_id = sender_user_id
             child.topic_summary = task_text[:200]
@@ -873,8 +1036,9 @@ class Orchestrator:
             self.children[item_id] = child
             await self._register_startup_watch(item_id, child, mode)
             self._save_children_state()
-            await self._post(f":rocket: *{label}*: New session started (`{mode}`)", item_id=item_id)
-            logger.info("Spawned child for %s (mode=%s)", label, mode)
+            pool_info = f", pool=`{pool_name}`" if pool_name else ""
+            await self._post(f":rocket: *{label}*: New session started (`{mode}`{pool_info})", item_id=item_id)
+            logger.info("Spawned child for %s (mode=%s, pool=%s)", label, mode, pool_name or "default")
         except Exception as e:
             self._cleanup_session(item_id)
             await self._post(f":rotating_light: *{label}*: Failed to spawn session — `{e}`")
@@ -890,14 +1054,12 @@ class Orchestrator:
         if exc is not None:
             logger.error("Unexpected error in spawn task %s: %s", task.get_name(), exc)
 
-    # Keep _format_duration as a static alias for backward compatibility
-    _format_duration = staticmethod(format_duration)
+
 
     async def _health_check(self) -> None:
         """Check all children for staleness and verify they're still alive."""
         if not self.children:
             return
-        idle_markers = self.config.runtime.idle_markers
         idle_timeout = self.config.sessions.idle_timeout
         threshold = self.config.sessions.idle_warning_threshold
 
@@ -911,6 +1073,9 @@ class Orchestrator:
         for item_id, child in list(self.children.items()):
             if child is None:
                 continue
+            # Per-pool idle markers (falls back to global runtime for single-pool)
+            runtime = self.config.get_runtime(child.pool_name)
+            idle_markers = runtime.idle_prompt_markers()
             label = self._item_label(item_id)
 
             alive = child.window_name in window_set
@@ -922,12 +1087,7 @@ class Orchestrator:
 
             if child.is_stale(idle_timeout):
                 output = await read_child_output(child, self.config, lines=5)
-                last_lines = output.strip().splitlines()[-3:] if output.strip() else []
-
-                at_prompt = any(
-                    any(marker in line for marker in idle_markers)
-                    for line in last_lines
-                )
+                at_prompt = output_has_prompt(output, idle_markers, scan_lines=3)
 
                 if at_prompt:
                     child.idle_warnings += 1
@@ -955,6 +1115,47 @@ class Orchestrator:
                     if child.idle_warnings > 0:
                         child.idle_warnings = 0
 
+    async def _check_api_errors(self) -> None:
+        """Scan recent tmux output of each child for API error patterns.
+
+        Posts a one-time Slack notification per unique error. Deduplicates
+        by hashing the matched line so the same error isn't reported twice.
+        """
+        if not self._error_patterns or not self.children:
+            return
+
+        scan_lines = self.config.sessions.error_scan_lines
+
+        for item_id, child in list(self.children.items()):
+            if child is None:
+                continue
+            label = self._item_label(item_id)
+
+            try:
+                output = await read_child_output(child, self.config, lines=scan_lines)
+            except Exception:
+                logger.debug("%s: failed to read output for error scan", label)
+                continue
+
+            found_error = False
+            for line in output.splitlines():
+                for pattern in self._error_patterns:
+                    if pattern.search(line):
+                        line_hash = hashlib.sha256(line.strip().encode()).hexdigest()
+                        if line_hash == child.last_reported_error_hash:
+                            found_error = True
+                            break  # Already reported this exact error
+                        child.last_reported_error_hash = line_hash
+                        error_text = line.strip()[:200]
+                        await self._post(
+                            f":warning: *{label}*: API error detected — `{error_text}`"
+                        )
+                        logger.warning("%s: API error detected: %s", label, error_text)
+                        found_error = True
+                        break  # One notification per child per cycle
+                if found_error:
+                    break
+
     async def _adopt_orphans(self) -> list[str]:
         """Scan tmux for orphaned child windows and re-adopt them."""
         adopted: list[str] = []
@@ -967,30 +1168,42 @@ class Orchestrator:
             return adopted
 
         for wname in windows:
-            item_id = parse_window_name(wname, self.config)
+            item_id, pool_name = parse_window_name(wname, self.config)
             if item_id is None:
                 continue
 
             if item_id in self.children:
                 continue
 
+            # Restore pool_name from saved state if not inferred from window prefix
+            saved = saved_state.get(item_id, {})
+            if not pool_name:
+                pool_name = saved.get("pool_name", "")
+
             try:
-                child = await adopt_child(item_id, self.config, known_windows=windows)
+                child = await adopt_child(item_id, self.config, known_windows=windows, pool_name=pool_name)
                 if item_id in saved_state:
                     state = saved_state[item_id]
                     child.started_at = state["started_at"]
                     if "last_message_at" in state:
                         child.last_message_at = state["last_message_at"]
-                    child.owner_user_id = state.get("owner_user_id", "")
-                    child.topic_summary = state.get("topic_summary", "")
-                    child.recent_keywords = state.get("recent_keywords", [])
-                    child.posted_message_ts = state.get("posted_message_ts", [])
-                    child.github_issue_id = state.get("github_issue_id")
+                    # Prefer window-inferred pool_name; fall back to saved state
+                    # only for legacy AGENT- windows where parsing returns ""
+                    child.pool_name = pool_name or state.get("pool_name", "")
+                else:
+                    # No saved state: mark as idle so busy guard doesn't
+                    # false-positive for the first busy_recency_seconds.
+                    child.last_message_at = child.started_at
+                child.owner_user_id = saved.get("owner_user_id", "")
+                child.topic_summary = saved.get("topic_summary", "")
+                child.recent_keywords = saved.get("recent_keywords", [])
+                child.posted_message_ts = saved.get("posted_message_ts", [])
+                child.github_issue_id = saved.get("github_issue_id")
                 self.children[item_id] = child
-                adopted.append(self._item_label(item_id))
-                logger.info("Re-adopted orphan session %s", self._item_label(item_id))
+                adopted.append(self._item_label(item_id, pool_name))
+                logger.info("Re-adopted orphan session %s", self._item_label(item_id, pool_name))
             except Exception as e:
-                logger.error("Failed to adopt %s: %s", self._item_label(item_id), e)
+                logger.error("Failed to adopt %s: %s", self._item_label(item_id, pool_name), e)
 
         if adopted:
             self._save_children_state()
@@ -1005,7 +1218,7 @@ class Orchestrator:
                 t.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-        active = [self._item_label(n) for n, c in self.children.items() if c is not None]
+        active = [self._item_label(n, c.pool_name if c else "") for n, c in self.children.items() if c is not None]
         if active:
             logger.info(
                 "Shutting down. %d session(s) continue: %s",

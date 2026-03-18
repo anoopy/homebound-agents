@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -795,6 +796,7 @@ class TestPromptRelay:
             "answer this question in detail",
             sender_user_id="WUSER",
             sender_extra={},
+            pool_name="",
         )
 
     def test_poll_cycle_auto_spawns_for_plain_text(self, orchestrator):
@@ -847,6 +849,7 @@ class TestPromptRelay:
             "how many issues are open today?",
             sender_user_id="WUSER",
             sender_extra={},
+            pool_name="",
         )
 
     def test_poll_cycle_agent_routes_to_free_slot(self, orchestrator):
@@ -876,6 +879,7 @@ class TestPromptRelay:
             "implement the login page",
             sender_user_id="WUSER",
             sender_extra={},
+            pool_name="",
         )
 
     def test_poll_cycle_accepts_numbered_agent_command(self, orchestrator):
@@ -905,6 +909,7 @@ class TestPromptRelay:
             "77 fix flaky test",
             sender_user_id="WUSER",
             sender_extra={},
+            pool_name="",
         )
 
     def test_poll_cycle_agent_space_number_same_as_no_space(self, orchestrator):
@@ -934,6 +939,7 @@ class TestPromptRelay:
             "fix the tests",
             sender_user_id="WUSER",
             sender_extra={},
+            pool_name="",
         )
 
     def test_poll_cycle_rejects_invalid_agent_slot(self, orchestrator):
@@ -1013,6 +1019,7 @@ class TestPromptRelay:
             "implement feature",
             sender_user_id="WUSER",
             sender_extra={},
+            pool_name="",
         )
 
     def test_poll_cycle_auto_spawns_for_unaddressed_text(self, orchestrator):
@@ -1571,9 +1578,10 @@ class TestAtAgentCascadeRouting:
         orch._post = AsyncMock()
         orch.startup_ts = 0.0  # Accept all messages regardless of ts
 
-        # Set up an existing session with keywords
+        # Set up an existing session with keywords (idle, not busy)
         child = ChildInfo(item_id=1, window_name="AGENT-1", owner_user_id="U123")
         child.recent_keywords = ["sectors", "india", "economy", "fii"]
+        child.last_message_at = datetime.now() - timedelta(seconds=60)
         orch.children[1] = child
 
         future_ts = str(time.time() + 1000)
@@ -2068,5 +2076,141 @@ class TestBackgroundSpawn:
                 # Shutdown should wait then cancel
                 await orch._shutdown()
                 assert task.done()
+
+        asyncio.run(run())
+
+
+class TestApiErrorDetection:
+    """Verify API error detection scans tmux output and posts Slack notifications."""
+
+    def _make_orchestrator(self):
+        config = HomeboundConfig()
+        config.security = SecurityConfig(allow_open_channel=True)
+        with patch("homebound.orchestrator.Orchestrator.transport", create=True):
+            from homebound.orchestrator import Orchestrator
+            orch = Orchestrator(config=config, dry_run=True)
+            orch._post = AsyncMock()
+            return orch
+
+    def test_error_detected_posts_notification(self):
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        orch.children[1] = child
+
+        async def run():
+            with patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock) as mock_read:
+                mock_read.return_value = "some output\n╰─ API Error: 500 Internal Server Error\n❯"
+                await orch._check_api_errors()
+
+            orch._post.assert_awaited_once()
+            msg = orch._post.call_args.args[0]
+            assert ":warning:" in msg
+            assert "Agent1" in msg
+            assert "API Error" in msg or "500" in msg
+
+        asyncio.run(run())
+
+    def test_same_error_twice_notifies_once(self):
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        orch.children[1] = child
+
+        async def run():
+            with patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock) as mock_read:
+                mock_read.return_value = "API Error: 500\n❯"
+                await orch._check_api_errors()
+                await orch._check_api_errors()
+
+            assert orch._post.await_count == 1
+
+        asyncio.run(run())
+
+    def test_different_error_posts_second_notification(self):
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        orch.children[1] = child
+
+        async def run():
+            with patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock) as mock_read:
+                mock_read.return_value = "API Error: 500\n❯"
+                await orch._check_api_errors()
+                mock_read.return_value = "overloaded_error\n❯"
+                await orch._check_api_errors()
+
+            assert orch._post.await_count == 2
+
+        asyncio.run(run())
+
+    def test_no_match_no_notification(self):
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        orch.children[1] = child
+
+        async def run():
+            with patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock) as mock_read:
+                mock_read.return_value = "Working on task...\nAll tests pass.\n❯"
+                await orch._check_api_errors()
+
+            orch._post.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_spawning_sentinel_skipped(self):
+        """children[id] = None (spawning sentinel) should not crash."""
+        orch = self._make_orchestrator()
+        orch.children[1] = None
+
+        async def run():
+            with patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock) as mock_read:
+                await orch._check_api_errors()
+                mock_read.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_read_child_output_raises_no_crash(self):
+        """If read_child_output raises, skip gracefully without posting."""
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        orch.children[1] = child
+
+        async def run():
+            with patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock) as mock_read:
+                mock_read.side_effect = RuntimeError("tmux gone")
+                await orch._check_api_errors()
+
+            orch._post.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_empty_error_patterns_skips_scan(self):
+        """When error_patterns is empty, no scanning occurs."""
+        orch = self._make_orchestrator()
+        orch._error_patterns = []
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        orch.children[1] = child
+
+        async def run():
+            with patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock) as mock_read:
+                await orch._check_api_errors()
+                mock_read.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_custom_pattern_matches(self):
+        """A custom regex pattern should detect matching errors."""
+        import re as _re
+        orch = self._make_orchestrator()
+        orch._error_patterns = [_re.compile(r"CUSTOM_ERR_\d+")]
+        child = ChildInfo(item_id=2, window_name="AGENT-2")
+        orch.children[2] = child
+
+        async def run():
+            with patch("homebound.orchestrator.read_child_output", new_callable=AsyncMock) as mock_read:
+                mock_read.return_value = "processing...\nCUSTOM_ERR_42 occurred\n❯"
+                await orch._check_api_errors()
+
+            orch._post.assert_awaited_once()
+            msg = orch._post.call_args.args[0]
+            assert "CUSTOM_ERR_42" in msg
 
         asyncio.run(run())

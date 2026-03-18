@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from datetime import timedelta
 
 from homebound.adapters.transport import IncomingMessage
 from homebound.config import HomeboundConfig, RoutingConfig, SecurityConfig
@@ -988,3 +986,355 @@ class TestLLMResponseParsing:
 
         result = asyncio.run(orch._router.match_by_llm("test"))
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Busy detection
+# ---------------------------------------------------------------------------
+
+class TestBusyDetection:
+    def _make_orchestrator(self, **routing_kwargs):
+        config = HomeboundConfig(
+            security=SecurityConfig(allow_open_channel=True),
+            routing=RoutingConfig(**routing_kwargs),
+        )
+        from homebound.orchestrator import Orchestrator
+        orch = Orchestrator(config, dry_run=True)
+        return orch
+
+    def test_is_busy_recent_message(self):
+        """Agent messaged 5s ago should be busy."""
+        orch = self._make_orchestrator(busy_recency_seconds=30)
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.last_message_at = datetime.now() - timedelta(seconds=5)
+        orch.children[1] = child
+
+        result = asyncio.run(orch._router.is_busy(1))
+        assert result is True
+
+    def test_is_busy_old_message(self):
+        """Agent messaged 60s ago should not be busy (30s window)."""
+        orch = self._make_orchestrator(busy_recency_seconds=30)
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.last_message_at = datetime.now() - timedelta(seconds=60)
+        orch.children[1] = child
+
+        result = asyncio.run(orch._router.is_busy(1))
+        assert result is False
+
+    def test_is_busy_none_child(self):
+        """Spawning sentinel (None) should not be busy."""
+        orch = self._make_orchestrator(busy_recency_seconds=30)
+        orch.children[1] = None
+
+        result = asyncio.run(orch._router.is_busy(1))
+        assert result is False
+
+    def test_is_busy_missing_child(self):
+        """Non-existent child should not be busy."""
+        orch = self._make_orchestrator(busy_recency_seconds=30)
+
+        result = asyncio.run(orch._router.is_busy(99))
+        assert result is False
+
+    def test_is_busy_zero_config_disables(self):
+        """busy_recency_seconds=0 should disable busy detection."""
+        orch = self._make_orchestrator(busy_recency_seconds=0)
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.last_message_at = datetime.now() - timedelta(seconds=1)
+        orch.children[1] = child
+
+        result = asyncio.run(orch._router.is_busy(1))
+        assert result is False
+
+    def test_is_busy_tmux_idle(self):
+        """With busy_check_tmux=True, agent at prompt should not be busy."""
+        orch = self._make_orchestrator(busy_recency_seconds=30, busy_check_tmux=True)
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.last_message_at = datetime.now() - timedelta(seconds=60)
+        orch.children[1] = child
+
+        with patch("homebound.routing.read_child_output", new_callable=AsyncMock) as mock_read:
+            mock_read.return_value = "some output\n❯ "  # idle marker
+            result = asyncio.run(orch._router.is_busy(1))
+        assert result is False
+
+    def test_is_busy_tmux_active(self):
+        """With busy_check_tmux=True, agent without prompt marker should be busy."""
+        orch = self._make_orchestrator(busy_recency_seconds=30, busy_check_tmux=True)
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.last_message_at = datetime.now() - timedelta(seconds=60)
+        orch.children[1] = child
+
+        with patch("homebound.routing.read_child_output", new_callable=AsyncMock) as mock_read:
+            mock_read.return_value = "Processing task...\nRunning tests..."
+            result = asyncio.run(orch._router.is_busy(1))
+        assert result is True
+
+    def test_is_busy_tmux_failure_fails_open(self):
+        """If tmux check fails, should return False (fail open)."""
+        orch = self._make_orchestrator(busy_recency_seconds=30, busy_check_tmux=True)
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.last_message_at = datetime.now() - timedelta(seconds=60)
+        orch.children[1] = child
+
+        with patch("homebound.routing.read_child_output", new_callable=AsyncMock) as mock_read:
+            mock_read.side_effect = RuntimeError("tmux error")
+            result = asyncio.run(orch._router.is_busy(1))
+        assert result is False
+
+    def test_is_busy_recency_skips_tmux(self):
+        """When recency says busy, tmux check should not be called."""
+        orch = self._make_orchestrator(busy_recency_seconds=30, busy_check_tmux=True)
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.last_message_at = datetime.now() - timedelta(seconds=5)
+        orch.children[1] = child
+
+        with patch("homebound.routing.read_child_output", new_callable=AsyncMock) as mock_read:
+            result = asyncio.run(orch._router.is_busy(1))
+            mock_read.assert_not_called()
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Busy routing — orchestrator-level integration
+# ---------------------------------------------------------------------------
+
+class TestBusyRouting:
+    def _make_orchestrator(self, max_concurrent=5, **routing_kwargs):
+        from homebound.config import SessionsConfig
+        config = HomeboundConfig(
+            security=SecurityConfig(allow_open_channel=True),
+            sessions=SessionsConfig(max_concurrent=max_concurrent),
+            routing=RoutingConfig(
+                keyword_routing=True,
+                keyword_match_threshold=1,
+                auto_spawn_on_no_match=True,
+                busy_recency_seconds=30,
+                **routing_kwargs,
+            ),
+        )
+        from homebound.orchestrator import Orchestrator
+        orch = Orchestrator(config, dry_run=False)
+        return orch
+
+    def test_keyword_match_busy_falls_through_to_spawn(self):
+        """Keyword-matched agent is busy -> message should fall through to auto-spawn."""
+        orch = self._make_orchestrator()
+        orch._post = AsyncMock()
+        orch.startup_ts = 0.0
+
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["authentication", "login", "password"]
+        child.last_message_at = datetime.now() - timedelta(seconds=5)  # busy
+        orch.children[1] = child
+
+        future_ts = str(time.time() + 1000)
+
+        with (
+            patch("homebound.orchestrator.send_to_child", new_callable=AsyncMock) as mock_send,
+            patch("homebound.orchestrator.spawn_child", new_callable=AsyncMock) as mock_spawn,
+        ):
+            mock_spawn.return_value = ChildInfo(item_id=2, window_name="AGENT-2")
+            mock_transport = MagicMock()
+            mock_transport.poll = MagicMock(return_value=[
+                IncomingMessage(
+                    text="fix authentication login",
+                    ts=future_ts,
+                    user="UUSER1",
+                ),
+            ])
+            mock_transport.is_from_agent = MagicMock(return_value=False)
+            mock_transport.poll_thread_replies = MagicMock(return_value=[])
+            orch._transport = mock_transport
+
+            asyncio.run(orch._poll_cycle())
+
+            # Should NOT have sent to the busy agent
+            mock_send.assert_not_called()
+            # Should have spawned a new agent
+            mock_spawn.assert_called_once()
+
+    def test_not_busy_routes_normally(self):
+        """Agent that is not busy should receive the message normally."""
+        orch = self._make_orchestrator()
+        orch._post = AsyncMock()
+        orch.startup_ts = 0.0
+
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["authentication", "login", "password"]
+        child.last_message_at = datetime.now() - timedelta(seconds=60)  # not busy
+        orch.children[1] = child
+
+        future_ts = str(time.time() + 1000)
+
+        with patch("homebound.orchestrator.send_to_child", new_callable=AsyncMock) as mock_send:
+            mock_transport = MagicMock()
+            mock_transport.poll = MagicMock(return_value=[
+                IncomingMessage(
+                    text="fix authentication login",
+                    ts=future_ts,
+                    user="UUSER1",
+                ),
+            ])
+            mock_transport.is_from_agent = MagicMock(return_value=False)
+            mock_transport.poll_thread_replies = MagicMock(return_value=[])
+            orch._transport = mock_transport
+
+            asyncio.run(orch._poll_cycle())
+
+            # Should have routed to the existing agent
+            mock_send.assert_called_once()
+
+    def test_thread_reply_busy_spawns_new_skipping_keyword(self):
+        """Thread reply to busy agent should skip to auto-spawn, not fall into keyword matching."""
+        orch = self._make_orchestrator()
+        orch._post = AsyncMock()
+        orch.startup_ts = 0.0
+
+        # Agent1 is busy and has keywords that would match
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["authentication", "tests"]
+        child.last_message_at = datetime.now() - timedelta(seconds=5)  # busy
+        orch.children[1] = child
+        orch._router._message_session_map["1000.0000"] = 1
+
+        # Agent3 is idle and has overlapping keywords — should NOT receive the thread reply
+        child3 = ChildInfo(item_id=3, window_name="AGENT-3")
+        child3.recent_keywords = ["tests", "authentication"]
+        child3.last_message_at = datetime.now() - timedelta(seconds=60)  # idle
+        orch.children[3] = child3
+
+        future_ts = str(time.time() + 1000)
+
+        with (
+            patch("homebound.orchestrator.send_to_child", new_callable=AsyncMock) as mock_send,
+            patch("homebound.orchestrator.spawn_child", new_callable=AsyncMock) as mock_spawn,
+        ):
+            mock_spawn.return_value = ChildInfo(item_id=2, window_name="AGENT-2")
+            mock_transport = MagicMock()
+            mock_transport.poll = MagicMock(return_value=[
+                IncomingMessage(
+                    text="also check the tests",
+                    ts=future_ts,
+                    user="UUSER1",
+                    thread_ts="1000.0000",
+                ),
+            ])
+            mock_transport.is_from_agent = MagicMock(return_value=False)
+            mock_transport.poll_thread_replies = MagicMock(return_value=[])
+            orch._transport = mock_transport
+
+            asyncio.run(orch._poll_cycle())
+
+            # Should NOT have sent to any existing agent (not Agent1 busy, not Agent3 keyword)
+            mock_send.assert_not_called()
+            # Should have spawned a new agent instead
+            mock_spawn.assert_called_once()
+
+    def test_all_busy_at_capacity(self):
+        """All agents busy + no free slots -> 'at capacity' message."""
+        orch = self._make_orchestrator(max_concurrent=1)
+        orch._post = AsyncMock()
+        orch.startup_ts = 0.0
+
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["authentication", "login"]
+        child.last_message_at = datetime.now() - timedelta(seconds=5)  # busy
+        orch.children[1] = child
+
+        future_ts = str(time.time() + 1000)
+
+        with patch("homebound.orchestrator.send_to_child", new_callable=AsyncMock) as mock_send:
+            mock_transport = MagicMock()
+            mock_transport.poll = MagicMock(return_value=[
+                IncomingMessage(
+                    text="fix authentication login",
+                    ts=future_ts,
+                    user="UUSER1",
+                ),
+            ])
+            mock_transport.is_from_agent = MagicMock(return_value=False)
+            mock_transport.poll_thread_replies = MagicMock(return_value=[])
+            orch._transport = mock_transport
+
+            asyncio.run(orch._poll_cycle())
+
+            # Should not have routed anywhere
+            mock_send.assert_not_called()
+            # Should have notified the user about capacity
+            assert orch._post.called
+            post_text = orch._post.call_args_list[-1][0][0]
+            assert "capacity" in post_text.lower() or "slot" in post_text.lower()
+
+    def test_same_batch_second_message_spawns_new(self):
+        """Two messages in same batch targeting same agent: first routes, second spawns."""
+        orch = self._make_orchestrator()
+        orch._post = AsyncMock()
+        orch.startup_ts = 0.0
+
+        child = ChildInfo(item_id=1, window_name="AGENT-1")
+        child.recent_keywords = ["authentication", "login", "password"]
+        child.last_message_at = datetime.now() - timedelta(seconds=60)  # not busy initially
+        orch.children[1] = child
+
+        now = time.time()
+        ts1 = str(now + 1000)
+        ts2 = str(now + 1001)
+
+        async def _update_last_message_at(child_arg, *args, **kwargs):
+            """Simulate send_to_child updating last_message_at."""
+            child_arg.last_message_at = datetime.now()
+
+        with (
+            patch("homebound.orchestrator.send_to_child", new_callable=AsyncMock) as mock_send,
+            patch("homebound.orchestrator.spawn_child", new_callable=AsyncMock) as mock_spawn,
+        ):
+            mock_send.side_effect = _update_last_message_at
+            mock_spawn.return_value = ChildInfo(item_id=2, window_name="AGENT-2")
+            mock_transport = MagicMock()
+            mock_transport.poll = MagicMock(return_value=[
+                IncomingMessage(
+                    text="fix authentication login",
+                    ts=ts1,
+                    user="UUSER1",
+                ),
+                IncomingMessage(
+                    text="also check login password",
+                    ts=ts2,
+                    user="UUSER1",
+                ),
+            ])
+            mock_transport.is_from_agent = MagicMock(return_value=False)
+            mock_transport.poll_thread_replies = MagicMock(return_value=[])
+            orch._transport = mock_transport
+
+            asyncio.run(orch._poll_cycle())
+
+            # First message should route to existing agent
+            mock_send.assert_called_once()
+            # Second message should spawn new agent (Agent1 now busy)
+            mock_spawn.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# RoutingConfig busy defaults
+# ---------------------------------------------------------------------------
+
+class TestBusyRoutingConfig:
+    def test_busy_defaults(self):
+        config = RoutingConfig()
+        assert config.busy_recency_seconds == 30
+        assert config.busy_check_tmux is False
+
+    def test_busy_from_yaml(self):
+        from homebound.config import _parse_config
+        raw = {
+            "routing": {
+                "busy_recency_seconds": 60,
+                "busy_check_tmux": True,
+            }
+        }
+        config = _parse_config(raw)
+        assert config.routing.busy_recency_seconds == 60
+        assert config.routing.busy_check_tmux is True

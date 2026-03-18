@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +35,7 @@ class ChildInfo:
     """Tracks a running child agent session."""
 
     item_id: int  # Slot number (1..max_concurrent) in unified pool
-    window_name: str  # e.g. "AGENT-1"
+    window_name: str  # e.g. "AGENT-1" or "CLAUDE-1"
     started_at: datetime = field(default_factory=datetime.now)
     last_message_at: datetime = field(default_factory=datetime.now)
     idle_warnings: int = 0
@@ -44,42 +45,72 @@ class ChildInfo:
     posted_message_ts: list[str] = field(default_factory=list)  # Slack ts of messages posted by this session
     github_issue_id: int | None = None  # Optional linked GitHub issue
     active_thread_ts: str = ""  # Thread ts for replies routed via Tier 1 thread routing
+    last_reported_error_hash: str = ""  # SHA256 of last reported API error (dedup)
+    pool_name: str = ""  # Runtime pool this session belongs to (e.g., "claude", "codex")
 
     def is_stale(self, timeout: int) -> bool:
         """Check if the child has been idle longer than timeout seconds."""
         return (datetime.now() - self.last_message_at).total_seconds() > timeout
 
 
-def window_name(config: HomeboundConfig, item_id: int) -> str:
-    """Generate tmux window name for a slot."""
+def window_name(config: HomeboundConfig, item_id: int, pool_name: str = "") -> str:
+    """Generate tmux window name for a slot.
+
+    In multi-runtime mode, uses the pool prefix (e.g., CLAUDE-1).
+    In single-runtime mode, uses the agent_label prefix (e.g., AGENT-1).
+    """
+    if pool_name and config.runtimes:
+        return f"{config.pool_window_prefix(pool_name)}{item_id}"
     return f"{config.sessions.window_prefix}{item_id}"
 
 
-def parse_window_name(wname: str, config: HomeboundConfig) -> int | None:
-    """Parse a slot number from a tmux window name. Returns None if not matching."""
+def parse_window_name(wname: str, config: HomeboundConfig) -> tuple[int | None, str]:
+    """Parse a slot number and pool name from a tmux window name.
+
+    Returns (slot, pool_name) or (None, "") if not matching.
+    In single-runtime mode, pool_name is "".
+    """
+    upper = wname.upper()
+    # Check multi-runtime pool prefixes first
+    if config.runtimes:
+        for pool in config.pool_names:
+            prefix = config.pool_window_prefix(pool)
+            if upper.startswith(prefix):
+                slot_text = wname[len(prefix):]
+                try:
+                    slot = int(slot_text)
+                except ValueError:
+                    continue
+                if slot >= 1:
+                    return slot, pool
+
+    # Single-runtime prefix
     prefixes = [config.sessions.window_prefix]
     if _LEGACY_WINDOW_PREFIX != config.sessions.window_prefix:
         prefixes.append(_LEGACY_WINDOW_PREFIX)
     for prefix in prefixes:
-        if wname.upper().startswith(prefix):
+        if upper.startswith(prefix):
             slot_text = wname[len(prefix):]
             try:
                 slot = int(slot_text)
             except ValueError:
                 continue
-            if slot < 1:
-                continue
-            return slot
-    return None
+            if slot >= 1:
+                return slot, ""
+    return None, ""
 
 
-def session_name(config: HomeboundConfig, item_id: int) -> str:
+def session_name(config: HomeboundConfig, item_id: int, pool_name: str = "") -> str:
     """Generate child agent name for transport identity."""
+    if pool_name and config.runtimes:
+        return f"{config.pool_session_prefix(pool_name)}{item_id}"
     return f"{config.sessions.session_prefix}{item_id}"
 
 
-def _item_label(config: HomeboundConfig, item_id: int) -> str:
-    """Format a user-facing item label."""
+def _item_label(config: HomeboundConfig, item_id: int, pool_name: str = "") -> str:
+    """Format a user-facing item label (e.g., Claude1, Codex2, or Agent1)."""
+    if pool_name and config.runtimes:
+        return f"{config.pool_label(pool_name)}{item_id}"
     return f"{config.sessions.agent_label}{item_id}"
 
 
@@ -101,8 +132,7 @@ _STOPWORDS = frozenset({
 
 def extract_keywords(text: str, max_keywords: int = 20) -> list[str]:
     """Extract meaningful keywords from text for routing heuristics."""
-    import re as _re
-    words = _re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower())
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower())
     seen: set[str] = set()
     keywords: list[str] = []
     for w in words:
@@ -139,6 +169,7 @@ async def spawn_child(
     task_text: str,
     config: HomeboundConfig,
     mode: str | None = None,
+    pool_name: str = "",
 ) -> ChildInfo:
     """Spawn a new interactive CLI session in a tmux window.
 
@@ -152,6 +183,7 @@ async def spawn_child(
         task_text: The task instructions from the transport.
         config: Homebound configuration.
         mode: Override mode (uses config.default_mode if None).
+        pool_name: Runtime pool to use (empty = default runtime).
 
     Returns:
         ChildInfo tracking the new session.
@@ -159,12 +191,12 @@ async def spawn_child(
     if mode is None:
         mode = config.default_mode
 
-    runtime = config.get_runtime()
+    runtime = config.get_runtime(pool_name)
     tmux_session = config.tmux_session_name
     project_dir = config.project_dir
-    label = _item_label(config, item_id)
+    label = _item_label(config, item_id, pool_name)
 
-    wname = window_name(config, item_id)
+    wname = window_name(config, item_id, pool_name)
     target = f"{tmux_session}:{wname}"
 
     # Create new tmux window
@@ -192,7 +224,7 @@ async def spawn_child(
             )
 
         # Build the initial prompt based on mode
-        initial_prompt = _build_prompt(item_id, task_text, mode, config)
+        initial_prompt = _build_prompt(item_id, task_text, mode, config, pool_name)
         logger.info("%s: using %s mode", label, mode)
 
         # Send the initial prompt
@@ -203,7 +235,7 @@ async def spawn_child(
         await kill_window(tmux_session, wname)
         raise
 
-    child = ChildInfo(item_id=item_id, window_name=wname)
+    child = ChildInfo(item_id=item_id, window_name=wname, pool_name=pool_name)
     logger.info("Spawned child session for %s in window %s", label, wname)
     return child
 
@@ -213,30 +245,29 @@ def _build_prompt(
     task_text: str,
     mode: str,
     config: HomeboundConfig,
+    pool_name: str = "",
 ) -> str:
     """Build the initial prompt for a child session based on mode."""
     mode_config = config.modes.get(mode)
+    label = _item_label(config, item_id, pool_name)
     if mode_config is None or not mode_config.prompt_template:
         # Fallback: use the task mode template
-        return f"Work on item {_item_label(config, item_id)}. Read the full details and complete the task."
+        return f"Work on item {label}. Read the full details and complete the task."
 
     # Prepare template variables
-    sid = session_name(config, item_id)
+    sid = session_name(config, item_id, pool_name)
     post_command = config.transport.post_command_template.format(
         session_name=sid, message="your message", thread_ts="",
     )
 
     clean_text = _sanitize_text(
         task_text, config.sessions.max_message_len,
-        label="task_text", item_id=item_id, item_label=_item_label(config, item_id),
+        label="task_text", item_id=item_id, item_label=label,
     )
 
-    team_name = session_name(config, item_id)
-
     prompt = mode_config.prompt_template.format(
-        team_name=team_name,
         item_id=item_id,
-        work_item_label=_item_label(config, item_id),
+        work_item_label=label,
         task_text=clean_text,
         post_command=post_command,
         session_name=sid,
@@ -268,8 +299,8 @@ async def send_to_child(
     Updates the child's last_message_at timestamp.
     """
     target = f"{config.tmux_session_name}:{child.window_name}"
-    sid = session_name(config, child.item_id)
-    label = _item_label(config, child.item_id)
+    sid = session_name(config, child.item_id, child.pool_name)
+    label = _item_label(config, child.item_id, child.pool_name)
 
     message = _sanitize_text(
         message, config.sessions.max_message_len,
@@ -311,7 +342,7 @@ async def close_child(
     config: HomeboundConfig,
 ) -> None:
     """Gracefully close a child session."""
-    runtime = config.get_runtime()
+    runtime = config.get_runtime(child.pool_name)
     target = f"{config.tmux_session_name}:{child.window_name}"
 
     # Send exit command
@@ -320,13 +351,14 @@ async def close_child(
 
     # Kill the tmux window
     await kill_window(config.tmux_session_name, child.window_name)
-    logger.info("Closed child session for %s", _item_label(config, child.item_id))
+    logger.info("Closed child session for %s", _item_label(config, child.item_id, child.pool_name))
 
 
 async def adopt_child(
     item_id: int,
     config: HomeboundConfig,
     known_windows: list[str] | None = None,
+    pool_name: str = "",
 ) -> ChildInfo:
     """Re-adopt an existing tmux window as a managed child.
 
@@ -336,18 +368,20 @@ async def adopt_child(
         item_id: The item ID to adopt.
         config: Homebound configuration.
         known_windows: Pre-fetched window list to avoid redundant tmux calls.
+        pool_name: Runtime pool this session belongs to.
     """
-    wname = window_name(config, item_id)
+    wname = window_name(config, item_id, pool_name)
 
     if known_windows is not None:
         windows = known_windows
     else:
         windows = await list_windows(config.tmux_session_name)
 
+    label = _item_label(config, item_id, pool_name)
     if wname not in windows:
-        raise RuntimeError(f"Cannot adopt {_item_label(config, item_id)}: window {wname} not found")
-    child = ChildInfo(item_id=item_id, window_name=wname)
-    logger.info("Adopted existing child session for %s", _item_label(config, item_id))
+        raise RuntimeError(f"Cannot adopt {label}: window {wname} not found")
+    child = ChildInfo(item_id=item_id, window_name=wname, pool_name=pool_name)
+    logger.info("Adopted existing child session for %s", label)
     return child
 
 
