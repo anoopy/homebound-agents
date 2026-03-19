@@ -66,7 +66,7 @@ Sessions survive network drops and orchestrator restarts, and everything is obse
 ### 3. Install
 
 ```bash
-git clone https://github.com/youruser/homebound-agents
+git clone https://github.com/anoopy/homebound-agents
 cd homebound-agents
 python3 -m venv venv   # Must be Python 3.10+; use python3.13 if python3 is older
 source venv/bin/activate
@@ -381,7 +381,7 @@ The script auto-sources `.env` from the repo root, injecting `SLACK_BOT_TOKEN` a
 ## Development
 
 ```bash
-git clone https://github.com/youruser/homebound-agents
+git clone https://github.com/anoopy/homebound-agents
 cd homebound-agents
 python3 -m venv venv
 source venv/bin/activate

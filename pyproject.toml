@@ -42,9 +42,9 @@ dev = [
 homebound = "homebound.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/youruser/homebound-agents"
-Repository = "https://github.com/youruser/homebound-agents"
-"Bug Tracker" = "https://github.com/youruser/homebound-agents/issues"
+Homepage = "https://github.com/anoopy/homebound-agents"
+Repository = "https://github.com/anoopy/homebound-agents"
+"Bug Tracker" = "https://github.com/anoopy/homebound-agents/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/homebound"]

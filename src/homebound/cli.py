@@ -97,7 +97,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     template = f"""\
 # homebound.yaml — Configuration for Homebound orchestrator
-# Docs: https://github.com/youruser/homebound-agents
+# Docs: https://github.com/anoopy/homebound-agents
 
 orchestrator:
   name: "{d.orchestrator.name}"
