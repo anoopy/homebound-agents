@@ -18,9 +18,10 @@ tracker:
   type: "github"
   project_dir: "/path/to/your/project"
 
-runtime:
-  type: "claude-code"
-  command: "claude --dangerously-skip-permissions"
+runtimes:
+  claude:
+    type: "claude-code"
+    command: "claude --dangerously-skip-permissions"
 
 sessions:
   max_concurrent: 3

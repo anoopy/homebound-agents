@@ -23,12 +23,13 @@ tracker:
   project_dir: "."  # Uses current working directory
   admin_pattern: '^@{name}\s+(.+)'
 
-runtime:
-  type: "claude-code"
-  command: "claude"
-  idle_markers: ["\u276f", "> "]
-  exit_command: "/exit"
-  env_unset: ["CLAUDECODE"]
+runtimes:
+  agent:
+    type: "claude-code"
+    command: "claude"
+    idle_markers: ["\u276f", "> "]
+    exit_command: "/exit"
+    env_unset: ["CLAUDECODE"]
 
 sessions:
   max_concurrent: 5

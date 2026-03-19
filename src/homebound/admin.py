@@ -187,14 +187,12 @@ class AdminCommandHandler:
             return
 
         lines = [f":clipboard: *Active sessions* (`{total}/{max_children}`):"]
-        # Show pool summary in multi-runtime mode
-        if self.config.is_multi_runtime:
-            pool_counts: dict[str, int] = {}
-            for c in active.values():
-                pn = c.pool_name or "default"
-                pool_counts[pn] = pool_counts.get(pn, 0) + 1
-            pool_summary = ", ".join(f"{p}: {n}" for p, n in sorted(pool_counts.items()))
-            lines.append(f"Pools: {pool_summary}")
+        pool_counts: dict[str, int] = {}
+        for c in active.values():
+            pn = c.pool_name or self.config.default_pool
+            pool_counts[pn] = pool_counts.get(pn, 0) + 1
+        pool_summary = ", ".join(f"{p}: {n}" for p, n in sorted(pool_counts.items()))
+        lines.append(f"Pools: {pool_summary}")
         now = datetime.now()
         for item_id, child in sorted(active.items()):
             uptime_secs = (now - child.started_at).total_seconds()
@@ -250,34 +248,24 @@ class AdminCommandHandler:
         aliases = [self.config.name] + self.config.orchestrator.aliases
         short = aliases[-1] if len(aliases) > 1 else aliases[0]
 
-        # Build session command examples based on configured pools
-        if self.config.is_multi_runtime:
-            pool_examples = []
-            for pool in self.config.pool_names:
-                lbl = self.config.pool_label(pool)
-                pool_examples.append(
-                    f">`@{lbl} <task>` — spawn `{pool}` session in next free slot\n"
-                    f">`@{lbl}1 <task>` — route to specific `{pool}` slot\n"
-                    f">`@{lbl}1 close` — close session\n"
-                    f">`{lbl}1 ans <value>` — answer runtime prompt"
-                )
-            session_lines = "\n".join(pool_examples)
-            pools_note = (
-                "\n\n*Pools:* "
-                + ", ".join(
-                    f"`{p}` ({self.config.runtimes[p].type})"
-                    for p in self.config.pool_names
-                )
+        # Build session command examples from configured pools
+        pool_examples = []
+        for pool in self.config.pool_names:
+            lbl = self.config.pool_label(pool)
+            pool_examples.append(
+                f">`@{lbl} <task>` — spawn `{pool}` session in next free slot\n"
+                f">`@{lbl}1 <task>` — route to specific `{pool}` slot\n"
+                f">`@{lbl}1 close` — close session\n"
+                f">`{lbl}1 ans <value>` — answer runtime prompt"
             )
-        else:
-            agent = self.config.sessions.agent_label
-            session_lines = (
-                f">`@{agent} <task>` — spawn or route to next free slot\n"
-                f">`@{agent}1 <task>` — route to specific slot (any number)\n"
-                f">`@{agent}1 close` — close session\n"
-                f">`{agent}1 ans <value>` — answer runtime prompt"
+        session_lines = "\n".join(pool_examples)
+        pools_note = (
+            "\n\n*Pools:* "
+            + ", ".join(
+                f"`{p}` ({self.config.runtimes[p].type})"
+                for p in self.config.pool_names
             )
-            pools_note = ""
+        )
 
         await self._post(
             ":information_source: *Commands*\n\n"

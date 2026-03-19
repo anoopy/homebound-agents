@@ -25,12 +25,13 @@ tracker:
   type: "github"
   project_dir: "."
 
-runtime:
-  type: "generic"
-  command: "codex --no-alt-screen --full-auto"
-  idle_markers: ["›"]       # Codex uses › (U+203A) as its input prompt
-  exit_command: "/exit"      # Codex exits with Ctrl-D; /exit is a fallback
-  env_unset: []
+runtimes:
+  codex:
+    type: "generic"
+    command: "codex --no-alt-screen --full-auto"
+    idle_markers: ["›"]       # Codex uses › (U+203A) as its input prompt
+    exit_command: "/exit"      # Codex exits with Ctrl-D; /exit is a fallback
+    env_unset: []
 
 sessions:
   max_concurrent: 5

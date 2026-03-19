@@ -284,7 +284,7 @@ class RoutingEngine:
             context_lines.append(f"[{sender_label}] {msg_text}")
         context_block = "\n".join(context_lines) if context_lines else "(no recent messages)"
 
-        example_label = next(iter(id_map.keys()), f"{self.config.sessions.agent_label}1")
+        example_label = next(iter(id_map.keys()), f"{self.config.pool_label(self.config.default_pool)}1")
         prompt = (
             "You are a strict message router. Given the recent conversation and active sessions, "
             "decide if the NEW message is a follow-up to an existing session.\n\n"
@@ -316,21 +316,13 @@ class RoutingEngine:
                 # Try exact match first, then extract first token
                 matched_id = id_map.get(answer)
                 if matched_id is None:
-                    # Try pool labels in multi-runtime mode
-                    if self.config.runtimes:
-                        for pool in self.config.pool_names:
-                            pl = re.escape(self.config.pool_label(pool).lower())
-                            first_token = re.match(rf"({pl}\d+)", answer)
-                            if first_token:
-                                matched_id = id_map.get(first_token.group(1))
-                                if matched_id is not None:
-                                    break
-                    # Fall back to agent_label
-                    if matched_id is None:
-                        label_lower = re.escape(self.config.sessions.agent_label.lower())
-                        first_token = re.match(rf"({label_lower}\d+)", answer)
+                    for pool in self.config.pool_names:
+                        pl = re.escape(self.config.pool_label(pool).lower())
+                        first_token = re.match(rf"({pl}\d+)", answer)
                         if first_token:
                             matched_id = id_map.get(first_token.group(1))
+                            if matched_id is not None:
+                                break
             logger.debug("LLM routing: answer=%r → item_id=%s", answer, matched_id)
             if matched_id is None:
                 return None

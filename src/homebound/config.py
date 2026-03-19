@@ -78,7 +78,6 @@ class RuntimeConfig:
 class SessionsConfig:
     """Child session lifecycle configuration."""
 
-    agent_label: str = "Agent"  # User-facing name: Agent1, Agent2, etc.
     max_concurrent: int = 5
     idle_timeout: int = 1800  # 30 min
     init_timeout: int = 60
@@ -100,10 +99,6 @@ class SessionsConfig:
     error_scan_lines: int = 20
 
     def __post_init__(self):
-        if not self.agent_label or not self.agent_label.isalpha():
-            raise ValueError(
-                f"agent_label must be non-empty and alphabetic, got: {self.agent_label!r}"
-            )
         # Validate error_patterns compile as regex
         for idx, pattern in enumerate(self.error_patterns):
             try:
@@ -113,15 +108,6 @@ class SessionsConfig:
                     f"SessionsConfig.error_patterns[{idx}] is not a valid regex: {e}"
                 ) from e
 
-    @property
-    def window_prefix(self) -> str:
-        """Tmux window prefix: AGENT- (derived from agent_label.upper())."""
-        return f"{self.agent_label.upper()}-"
-
-    @property
-    def session_prefix(self) -> str:
-        """Transport session prefix: agent- (derived from agent_label.lower())."""
-        return f"{self.agent_label.lower()}-"
 
 
 @dataclass
@@ -268,7 +254,6 @@ class HomeboundConfig:
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
-    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
     prompt_relay: PromptRelayConfig = field(default_factory=PromptRelayConfig)
     routing: RoutingConfig = field(default_factory=RoutingConfig)
@@ -278,10 +263,11 @@ class HomeboundConfig:
         default_factory=lambda: {"close", "stop", "done", "exit", "quit", "kill"}
     )
     default_mode: str = "task"
-    # Multi-runtime pools: maps pool name → RuntimeConfig.
-    # When present, each pool gets its own label prefix (e.g., "Claude1", "Codex2").
-    # When empty, falls back to single-runtime mode using `runtime` + `sessions.agent_label`.
-    runtimes: dict[str, RuntimeConfig] = field(default_factory=dict)
+    # Named runtime pools: maps pool name → RuntimeConfig.
+    # Each pool gets its own label prefix (e.g., "Claude1", "Codex2").
+    runtimes: dict[str, RuntimeConfig] = field(
+        default_factory=lambda: {"agent": RuntimeConfig()}
+    )
 
     # Derived properties
     @property
@@ -297,34 +283,21 @@ class HomeboundConfig:
         return Path(self.tracker.project_dir).resolve()
 
     @property
-    def agent_label(self) -> str:
-        """Convenience accessor for sessions.agent_label."""
-        return self.sessions.agent_label
-
-    @property
-    def is_multi_runtime(self) -> bool:
-        """True when named runtime pools are configured (one or more)."""
-        return bool(self.runtimes)
-
-    @property
     def pool_names(self) -> list[str]:
         """Sorted list of configured pool names."""
-        return sorted(self.runtimes.keys()) if self.runtimes else [self.agent_label.lower()]
+        return sorted(self.runtimes.keys())
 
     @property
     def default_pool(self) -> str:
-        """The default pool name (first alphabetically, or agent_label in single-runtime)."""
-        if self.runtimes:
-            return sorted(self.runtimes.keys())[0]
-        return self.agent_label.lower()
+        """The default pool name (first alphabetically)."""
+        return sorted(self.runtimes.keys())[0]
 
     @property
     def ignored_prefixes(self) -> list[str]:
         """All prefixes to ignore when polling (prevents re-routing loops)."""
-        base = [self.name, self.sessions.session_prefix, self.sessions.agent_label]
+        base = [self.name]
         base.extend(self.orchestrator.aliases)
         base.extend(self.transport.ignored_prefixes)
-        # Add all pool names as ignored prefixes in multi-runtime mode
         for pool in self.pool_names:
             label = pool.capitalize()
             base.extend([label, label.lower(), f"{label.lower()}-"])
@@ -339,8 +312,6 @@ class HomeboundConfig:
 
     def pool_label(self, pool_name: str) -> str:
         """User-facing label prefix for a pool (e.g., 'claude' → 'Claude')."""
-        if not self.runtimes:
-            return self.agent_label
         return pool_name.capitalize()
 
     def pool_window_prefix(self, pool_name: str) -> str:
@@ -353,7 +324,6 @@ class HomeboundConfig:
 
     def __post_init__(self):
         # Adapter instance caches (not dataclass fields)
-        self._runtime_instance = None
         self._runtime_instances: dict[str, object] = {}
         self._transport_instance = None
         self._tracker_instance = None
@@ -399,26 +369,9 @@ class HomeboundConfig:
         """Create or return cached runtime instance.
 
         Args:
-            pool_name: Pool name to look up. If None, uses the default pool
-                (backward-compatible single-runtime path).
+            pool_name: Pool name to look up. If None or empty, uses default_pool.
         """
-        if pool_name is not None and pool_name in self.runtimes:
-            return self.get_runtime_for_pool(pool_name)
-
-        if self._runtime_instance is not None:
-            return self._runtime_instance
-
-        from homebound.runtimes import RUNTIME_REGISTRY
-
-        runtime_cls = RUNTIME_REGISTRY.get(self.runtime.type)
-        if runtime_cls is None:
-            raise ValueError(
-                f"Unknown runtime type: {self.runtime.type}. "
-                f"Available: {', '.join(RUNTIME_REGISTRY.keys())}"
-            )
-
-        self._runtime_instance = runtime_cls.from_config(self.runtime)
-        return self._runtime_instance
+        return self.get_runtime_for_pool(pool_name or self.default_pool)
 
     def get_runtime_for_pool(self, pool_name: str):
         """Create or return cached runtime instance for a named pool.
@@ -520,15 +473,23 @@ def _parse_config(raw: dict) -> HomeboundConfig:
     orchestrator = _build_dataclass(OrchestratorConfig, raw.get("orchestrator", {}))
     transport = _build_dataclass(TransportConfig, raw.get("transport", {}))
     tracker = _build_dataclass(TrackerConfig, raw.get("tracker", {}))
-    runtime = _build_dataclass(RuntimeConfig, raw.get("runtime", {}))
     sessions = _build_dataclass(SessionsConfig, raw.get("sessions", {}))
     prompt_relay = _build_dataclass(PromptRelayConfig, raw.get("prompt_relay", {}))
     routing = _build_dataclass(RoutingConfig, raw.get("routing", {}))
     security = _build_dataclass(SecurityConfig, raw.get("security", {}))
 
+    # Migration aid: reject deprecated runtime: (singular) key
+    if "runtime" in raw:
+        raise ValueError(
+            "The 'runtime:' (singular) config key is no longer supported. "
+            "Please migrate to 'runtimes:' (plural). Example:\n"
+            "  runtimes:\n"
+            "    claude:\n"
+            "      type: claude-code\n"
+            "      command: claude"
+        )
+
     # Parse named runtimes (multi-model pools).
-    # If `runtimes:` (plural) is present, use it; otherwise fall back to
-    # wrapping `runtime:` (singular) into a single-entry dict keyed by agent_label.
     runtimes: dict[str, RuntimeConfig] = {}
     runtimes_raw = raw.get("runtimes", {})
     if runtimes_raw and isinstance(runtimes_raw, dict):
@@ -556,14 +517,13 @@ def _parse_config(raw: dict) -> HomeboundConfig:
         orchestrator=orchestrator,
         transport=transport,
         tracker=tracker,
-        runtime=runtime,
         sessions=sessions,
         prompt_relay=prompt_relay,
         routing=routing,
         modes=modes if modes else {},  # Let __post_init__ fill defaults if empty
         security=security,
         default_mode=default_mode,
-        runtimes=runtimes,
+        runtimes=runtimes if runtimes else {"agent": RuntimeConfig()},
     )
 
     if "close_commands" in raw:

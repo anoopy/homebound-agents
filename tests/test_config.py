@@ -73,13 +73,13 @@ class TestHomeboundConfigDefaults:
 
     def test_default_runtime_is_claude_code(self):
         config = HomeboundConfig()
-        assert config.runtime.type == "claude-code"
-        assert config.runtime.command == "claude"
+        assert config.runtimes["agent"].type == "claude-code"
+        assert config.runtimes["agent"].command == "claude"
 
     def test_default_runtime_safe(self):
         """Default runtime command must NOT contain --dangerously-skip-permissions."""
         config = HomeboundConfig()
-        assert "--dangerously-skip-permissions" not in config.runtime.command
+        assert "--dangerously-skip-permissions" not in config.runtimes["agent"].command
 
     def test_default_prompt_relay_enabled(self):
         config = HomeboundConfig()
@@ -105,37 +105,6 @@ class TestIgnoredPrefixes:
         assert "homebound" in prefixes
         assert "agent-" in prefixes
         assert "Agent" in prefixes
-
-
-class TestAgentLabel:
-    """Verify agent_label defaults, derived prefixes, and validation."""
-
-    def test_default_agent_label(self):
-        config = HomeboundConfig()
-        assert config.sessions.agent_label == "Agent"
-
-    def test_default_window_prefix(self):
-        config = HomeboundConfig()
-        assert config.sessions.window_prefix == "AGENT-"
-
-    def test_default_session_prefix(self):
-        config = HomeboundConfig()
-        assert config.sessions.session_prefix == "agent-"
-
-    def test_yaml_override_derives_prefixes(self):
-        raw = {"sessions": {"agent_label": "Bot"}}
-        config = _parse_config(raw)
-        assert config.sessions.agent_label == "Bot"
-        assert config.sessions.window_prefix == "BOT-"
-        assert config.sessions.session_prefix == "bot-"
-
-    def test_empty_agent_label_raises(self):
-        with pytest.raises(ValueError, match="agent_label must be non-empty"):
-            SessionsConfig(agent_label="")
-
-    def test_numeric_agent_label_raises(self):
-        with pytest.raises(ValueError, match="agent_label must be non-empty and alphabetic"):
-            SessionsConfig(agent_label="Agent1")
 
 
 class TestAdminPattern:

@@ -26,10 +26,11 @@ from homebound.session import (
 class TestMultiRuntimeConfig:
     """Config parsing for runtimes: (plural) YAML key."""
 
-    def test_empty_runtimes_is_single_runtime(self):
+    def test_default_runtimes_has_agent_pool(self):
         cfg = HomeboundConfig()
-        assert cfg.runtimes == {}
-        assert not cfg.is_multi_runtime
+        assert "agent" in cfg.runtimes
+        assert cfg.runtimes["agent"].type == "claude-code"
+        assert cfg.default_pool == "agent"
 
     def test_parse_multi_runtime(self):
         cfg = _parse_config({
@@ -39,7 +40,6 @@ class TestMultiRuntimeConfig:
             },
         })
         assert len(cfg.runtimes) == 2
-        assert cfg.is_multi_runtime
         assert cfg.runtimes["claude"].type == "claude-code"
         assert cfg.runtimes["codex"].command == "codex --full-auto"
 
@@ -93,14 +93,10 @@ class TestMultiRuntimeConfig:
         })
         assert "claude" in cfg.runtimes
 
-    def test_backward_compat_single_runtime(self):
-        """When only runtime: (singular) is present, behavior is unchanged."""
-        cfg = _parse_config({"runtime": {"type": "claude-code", "command": "claude"}})
-        assert cfg.runtimes == {}
-        assert not cfg.is_multi_runtime
-        assert cfg.default_pool == "agent"  # derived from agent_label
-        rt = cfg.get_runtime()
-        assert rt.command == "claude"
+    def test_deprecated_runtime_singular_raises(self):
+        """runtime: (singular) without runtimes: should raise ValueError."""
+        with pytest.raises(ValueError, match="no longer supported"):
+            _parse_config({"runtime": {"type": "claude-code", "command": "claude"}})
 
     def test_get_runtime_for_pool(self):
         cfg = _parse_config({
@@ -170,7 +166,7 @@ class TestPoolAwareNaming:
 
     @pytest.fixture
     def single_cfg(self):
-        return _parse_config({"runtime": {"type": "claude-code"}})
+        return _parse_config({"runtimes": {"agent": {"type": "claude-code"}}})
 
     def test_window_name_multi(self, multi_cfg):
         assert window_name(multi_cfg, 1, "claude") == "CLAUDE-1"
@@ -203,9 +199,9 @@ class TestPoolAwareNaming:
         slot, pool = parse_window_name("UNKNOWN-1", multi_cfg)
         assert slot is None
 
-    def test_parse_window_name_single(self, single_cfg):
+    def test_parse_window_name_single_pool(self, single_cfg):
         slot, pool = parse_window_name("AGENT-1", single_cfg)
-        assert slot == 1 and pool == ""
+        assert slot == 1 and pool == "agent"
 
 
 # ---------------------------------------------------------------------------
@@ -277,18 +273,17 @@ class TestMultiPoolCommandParsing:
         assert slot is None
         assert payload == "do something"
 
-    def test_parse_agent_label_still_works(self, multi_orch):
+    def test_parse_agent_label_not_matched_without_pool(self, multi_orch):
+        """@Agent1 doesn't match when 'agent' is not a configured pool."""
         result = multi_orch._parse_role_command("@Agent1 fix it")
-        assert result is not None
-        pool, slot, payload = result
-        assert pool == ""  # agent_label, not a pool
-        assert slot == 1
+        assert result is None
 
-    def test_parse_single_runtime_backward_compat(self, single_orch):
+    def test_parse_agent_pool_works(self, single_orch):
+        """@Agent1 works when 'agent' IS a configured pool (default config)."""
         result = single_orch._parse_role_command("@Agent1 do task")
         assert result is not None
         pool, slot, payload = result
-        assert pool == ""
+        assert pool == "agent"
         assert slot == 1
         assert payload == "do task"
 
@@ -383,17 +378,12 @@ class TestMultiRuntimeStatePersistence:
 class TestReviewRegressions:
     """Regression tests for issues found during code review."""
 
-    def test_is_multi_runtime_true_for_single_pool(self):
-        """Issue 1: is_multi_runtime must be True even with one pool."""
+    def test_pool_label_works_for_single_pool(self):
         cfg = _parse_config({
             "runtimes": {"claude": {"type": "claude-code"}},
         })
-        assert cfg.is_multi_runtime
         assert cfg.pool_label("claude") == "Claude"
-
-    def test_is_multi_runtime_false_without_runtimes(self):
-        cfg = _parse_config({"runtime": {"type": "claude-code"}})
-        assert not cfg.is_multi_runtime
+        assert cfg.pool_names == ["claude"]
 
     def test_health_check_uses_per_pool_markers(self):
         """Issue 2: health check must use per-pool idle markers, not global."""

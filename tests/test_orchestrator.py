@@ -796,7 +796,7 @@ class TestPromptRelay:
             "answer this question in detail",
             sender_user_id="WUSER",
             sender_extra={},
-            pool_name="",
+            pool_name="agent",
         )
 
     def test_poll_cycle_auto_spawns_for_plain_text(self, orchestrator):
@@ -849,7 +849,7 @@ class TestPromptRelay:
             "how many issues are open today?",
             sender_user_id="WUSER",
             sender_extra={},
-            pool_name="",
+            pool_name="agent",
         )
 
     def test_poll_cycle_agent_routes_to_free_slot(self, orchestrator):
@@ -879,7 +879,7 @@ class TestPromptRelay:
             "implement the login page",
             sender_user_id="WUSER",
             sender_extra={},
-            pool_name="",
+            pool_name="agent",
         )
 
     def test_poll_cycle_accepts_numbered_agent_command(self, orchestrator):
@@ -909,7 +909,7 @@ class TestPromptRelay:
             "77 fix flaky test",
             sender_user_id="WUSER",
             sender_extra={},
-            pool_name="",
+            pool_name="agent",
         )
 
     def test_poll_cycle_agent_space_number_same_as_no_space(self, orchestrator):
@@ -939,7 +939,7 @@ class TestPromptRelay:
             "fix the tests",
             sender_user_id="WUSER",
             sender_extra={},
-            pool_name="",
+            pool_name="agent",
         )
 
     def test_poll_cycle_rejects_invalid_agent_slot(self, orchestrator):
@@ -1019,7 +1019,7 @@ class TestPromptRelay:
             "implement feature",
             sender_user_id="WUSER",
             sender_extra={},
-            pool_name="",
+            pool_name="agent",
         )
 
     def test_poll_cycle_auto_spawns_for_unaddressed_text(self, orchestrator):
@@ -1586,12 +1586,13 @@ class TestAtAgentCascadeRouting:
 
         future_ts = str(time.time() + 1000)
 
-        # Mock send_to_child so we can verify routing
+        # Mock send_to_child so we can verify routing.
+        # Use bare text (no @Agent prefix) so it goes through the keyword cascade.
         with patch("homebound.orchestrator.send_to_child", new_callable=AsyncMock) as mock_send:
             mock_transport = MagicMock()
             mock_transport.poll = MagicMock(return_value=[
                 IncomingMessage(
-                    text="@Agent which sectors in india have better prospects",
+                    text="which sectors in india have better prospects",
                     ts=future_ts,
                     user="U123",
                 ),

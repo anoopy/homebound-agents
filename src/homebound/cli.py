@@ -119,27 +119,20 @@ tracker:
   admin_pattern: '^@{{name}}\\s+(.+)'
   command_timeout: {d.tracker.command_timeout}
 
-runtime:
-  type: "{d.runtime.type}"
-  command: "{d.runtime.command}"
-  idle_markers: {yaml_list(d.runtime.idle_markers)}
-  exit_command: "{d.runtime.exit_command}"
-  env_unset: {yaml_list(d.runtime.env_unset)}
-
-# Multi-runtime pools (optional) — uncomment to run multiple AI backends simultaneously.
-# Each pool gets its own label prefix (e.g. @Claude1, @Codex1).
-# When present, the top-level `runtime:` key is ignored.
-# runtimes:
-#   claude:
-#     type: claude-code
-#     command: "claude --dangerously-skip-permissions"
-#   codex:
-#     type: generic
-#     command: "codex --no-alt-screen --full-auto"
-#     idle_markers: ["›"]
+runtimes:
+  agent:
+    type: "claude-code"
+    command: "claude"
+    idle_markers: ["\u276f", "> "]
+    exit_command: "/exit"
+    env_unset: ["CLAUDECODE"]
+  # Add more pools to run multiple AI backends simultaneously:
+  # codex:
+  #   type: generic
+  #   command: "codex --no-alt-screen --full-auto"
+  #   idle_markers: ["›"]
 
 sessions:
-  agent_label: "{d.sessions.agent_label}"  # User-facing name: Agent1, Agent2 (or Claude, Bot, etc.)
   max_concurrent: {d.sessions.max_concurrent}
   idle_timeout: {d.sessions.idle_timeout}
   init_timeout: {d.sessions.init_timeout}

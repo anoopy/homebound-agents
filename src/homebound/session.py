@@ -27,9 +27,6 @@ from homebound.tmux import (
 
 logger = logging.getLogger("homebound.session")
 
-_LEGACY_WINDOW_PREFIX = "CLAUDE-"  # For backward-compat adoption of old windows
-
-
 @dataclass
 class ChildInfo:
     """Tracks a running child agent session."""
@@ -54,41 +51,19 @@ class ChildInfo:
 
 
 def window_name(config: HomeboundConfig, item_id: int, pool_name: str = "") -> str:
-    """Generate tmux window name for a slot.
-
-    In multi-runtime mode, uses the pool prefix (e.g., CLAUDE-1).
-    In single-runtime mode, uses the agent_label prefix (e.g., AGENT-1).
-    """
-    if pool_name and config.runtimes:
-        return f"{config.pool_window_prefix(pool_name)}{item_id}"
-    return f"{config.sessions.window_prefix}{item_id}"
+    """Generate tmux window name for a slot (e.g., CLAUDE-1, CODEX-2)."""
+    pool = pool_name or config.default_pool
+    return f"{config.pool_window_prefix(pool)}{item_id}"
 
 
 def parse_window_name(wname: str, config: HomeboundConfig) -> tuple[int | None, str]:
     """Parse a slot number and pool name from a tmux window name.
 
     Returns (slot, pool_name) or (None, "") if not matching.
-    In single-runtime mode, pool_name is "".
     """
     upper = wname.upper()
-    # Check multi-runtime pool prefixes first
-    if config.runtimes:
-        for pool in config.pool_names:
-            prefix = config.pool_window_prefix(pool)
-            if upper.startswith(prefix):
-                slot_text = wname[len(prefix):]
-                try:
-                    slot = int(slot_text)
-                except ValueError:
-                    continue
-                if slot >= 1:
-                    return slot, pool
-
-    # Single-runtime prefix
-    prefixes = [config.sessions.window_prefix]
-    if _LEGACY_WINDOW_PREFIX != config.sessions.window_prefix:
-        prefixes.append(_LEGACY_WINDOW_PREFIX)
-    for prefix in prefixes:
+    for pool in config.pool_names:
+        prefix = config.pool_window_prefix(pool)
         if upper.startswith(prefix):
             slot_text = wname[len(prefix):]
             try:
@@ -96,22 +71,20 @@ def parse_window_name(wname: str, config: HomeboundConfig) -> tuple[int | None, 
             except ValueError:
                 continue
             if slot >= 1:
-                return slot, ""
+                return slot, pool
     return None, ""
 
 
 def session_name(config: HomeboundConfig, item_id: int, pool_name: str = "") -> str:
     """Generate child agent name for transport identity."""
-    if pool_name and config.runtimes:
-        return f"{config.pool_session_prefix(pool_name)}{item_id}"
-    return f"{config.sessions.session_prefix}{item_id}"
+    pool = pool_name or config.default_pool
+    return f"{config.pool_session_prefix(pool)}{item_id}"
 
 
 def _item_label(config: HomeboundConfig, item_id: int, pool_name: str = "") -> str:
-    """Format a user-facing item label (e.g., Claude1, Codex2, or Agent1)."""
-    if pool_name and config.runtimes:
-        return f"{config.pool_label(pool_name)}{item_id}"
-    return f"{config.sessions.agent_label}{item_id}"
+    """Format a user-facing item label (e.g., Claude1, Codex2, Agent1)."""
+    pool = pool_name or config.default_pool
+    return f"{config.pool_label(pool)}{item_id}"
 
 
 _STOPWORDS = frozenset({

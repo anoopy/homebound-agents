@@ -234,21 +234,14 @@ class Orchestrator:
     def _resolve_label_to_item_id(self, label: str) -> tuple[int | None, str]:
         """Resolve a user-facing label to (slot, pool_name).
 
-        Handles: Agent1, Claude1, Codex 2, or raw int.
+        Handles: Claude1, Codex 2, Agent1, or raw int.
         Returns (None, "") if not matching.
         """
-        # Try each pool label (multi-runtime)
-        if self.config.runtimes:
-            for pool in self.config.pool_names:
-                pool_label = self.config.pool_label(pool)
-                m = re.fullmatch(rf"(?:{re.escape(pool_label)})\s*(\d+)", label.strip(), re.IGNORECASE)
-                if m:
-                    return int(m.group(1)), pool
-
-        # Single-runtime label
-        dev_match = re.fullmatch(rf"(?:{re.escape(self.config.sessions.agent_label)})\s*(\d+)", label.strip(), re.IGNORECASE)
-        if dev_match:
-            return int(dev_match.group(1)), ""
+        for pool in self.config.pool_names:
+            pool_label = self.config.pool_label(pool)
+            m = re.fullmatch(rf"(?:{re.escape(pool_label)})\s*(\d+)", label.strip(), re.IGNORECASE)
+            if m:
+                return int(m.group(1)), pool
         try:
             return int(label.strip()), ""
         except ValueError:
@@ -265,12 +258,7 @@ class Orchestrator:
 
         Returns (pool_name, slot, payload) or None.
         """
-        # Build label alternatives: pool labels + agent_label
-        labels = []
-        if self.config.runtimes:
-            for pool in self.config.pool_names:
-                labels.append(re.escape(self.config.pool_label(pool)))
-        labels.append(re.escape(self.config.sessions.agent_label))
+        labels = [re.escape(self.config.pool_label(p)) for p in self.config.pool_names]
         label_group = "|".join(labels)
 
         match = re.match(rf"^@({label_group})\s*(\d+)?\s+(.+)$", text.strip(), re.IGNORECASE)
@@ -283,11 +271,10 @@ class Orchestrator:
 
         # Resolve matched label to pool name
         pool_name = ""
-        if self.config.runtimes:
-            for pool in self.config.pool_names:
-                if self.config.pool_label(pool).lower() == matched_label:
-                    pool_name = pool
-                    break
+        for pool in self.config.pool_names:
+            if self.config.pool_label(pool).lower() == matched_label:
+                pool_name = pool
+                break
         return pool_name, slot, payload
 
     @staticmethod
@@ -340,18 +327,11 @@ class Orchestrator:
         logger.info("%s: startup signal observed from %s", self._item_label(item_id), source)
 
     def _extract_item_id_from_agent_message(self, text: str) -> int | None:
-        # Check multi-runtime pool prefixes
-        if self.config.runtimes:
-            for pool in self.config.pool_names:
-                prefix = re.escape(self.config.pool_session_prefix(pool).rstrip("-"))
-                m = re.search(rf"\[{prefix}-?(\d+)\b", text, re.IGNORECASE)
-                if m:
-                    return int(m.group(1))
-        # Single-runtime prefix
-        prefix = re.escape(self.config.sessions.session_prefix.rstrip("-"))
-        dev_match = re.search(rf"\[{prefix}-?(\d+)\b", text, re.IGNORECASE)
-        if dev_match:
-            return int(dev_match.group(1))
+        for pool in self.config.pool_names:
+            prefix = re.escape(self.config.pool_session_prefix(pool).rstrip("-"))
+            m = re.search(rf"\[{prefix}-?(\d+)\b", text, re.IGNORECASE)
+            if m:
+                return int(m.group(1))
         return None
 
     def _record_agent_startup_signal(self, text: str, ts: str = "") -> None:
@@ -537,11 +517,10 @@ class Orchestrator:
 
         parts = [f":large_green_circle: *{self.config.name} online*"]
         parts.append(f"Max {self.max_children} concurrent sessions | Polling every {self.poll_interval}s")
-        if self.config.is_multi_runtime:
-            pool_info = ", ".join(
-                f"`{p}` ({self.config.runtimes[p].type})" for p in self.config.pool_names
-            )
-            parts.append(f":gear: Pools: {pool_info}")
+        pool_info = ", ".join(
+            f"`{p}` ({self.config.runtimes[p].type})" for p in self.config.pool_names
+        )
+        parts.append(f":gear: Pools: {pool_info}")
         if adopted:
             parts.append(f":recycle: Re-adopted {len(adopted)} session(s): {', '.join(adopted)}")
         if self.config.security.allowed_users:
@@ -662,10 +641,8 @@ class Orchestrator:
                 )
                 continue
 
-            # Build prompt answer pattern for all pool labels + agent_label
-            ans_labels = [re.escape(self.config.sessions.agent_label)]
-            if self.config.runtimes:
-                ans_labels.extend(re.escape(self.config.pool_label(p)) for p in self.config.pool_names)
+            # Build prompt answer pattern for pool labels
+            ans_labels = [re.escape(self.config.pool_label(p)) for p in self.config.pool_names]
             ans_label_group = "|".join(ans_labels)
             prompt_answer_match = re.search(
                 rf"^((?:{ans_label_group})?\s*\d+)\s+ans\s+(.+)$", stripped, re.IGNORECASE,
@@ -726,21 +703,15 @@ class Orchestrator:
                             )
                         continue
 
-            # Bare role match (e.g., "@Agent", "@Claude" with no payload)
-            label_alts = [re.escape(self.config.sessions.agent_label)]
-            if self.config.runtimes:
-                label_alts.extend(re.escape(self.config.pool_label(p)) for p in self.config.pool_names)
+            # Bare role match (e.g., "@Claude" with no payload)
+            label_alts = [re.escape(self.config.pool_label(p)) for p in self.config.pool_names]
             bare_pattern = rf"^@({'|'.join(label_alts)})\s*\d*$"
             bare_role_match = re.match(bare_pattern, stripped, re.IGNORECASE)
             if bare_role_match:
                 examples = []
-                if self.config.runtimes:
-                    for p in self.config.pool_names[:2]:
-                        lbl = self.config.pool_label(p)
-                        examples.append(f"`@{lbl} <task>` or `@{lbl}1 <task>`")
-                else:
-                    al = self.config.sessions.agent_label
-                    examples.append(f"`@{al} <task>` or `@{al}1 <task>`")
+                for p in self.config.pool_names[:2]:
+                    lbl = self.config.pool_label(p)
+                    examples.append(f"`@{lbl} <task>` or `@{lbl}1 <task>`")
                 await self._post(f"Usage: {' | '.join(examples)} to target a specific slot.")
                 continue
 
