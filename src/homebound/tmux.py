@@ -122,10 +122,10 @@ async def wait_for_prompt(
                 logger.info("Prompt detected for %s after %ds (extended wait)", target, elapsed)
                 return True
         logger.warning(
-            "Prompt marker not detected for %s after %ds (extended) — continuing anyway",
+            "Prompt marker not detected for %s after %ds (extended) — treating as failure",
             target, elapsed,
         )
-        return True
+        return False
 
     logger.warning("Prompt not detected for %s after %ds", target, timeout)
     return False

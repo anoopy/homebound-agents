@@ -97,6 +97,7 @@ class SessionsConfig:
         r"(?i)connection\s*(refused|reset|timed?\s*out)",
     ])
     error_scan_lines: int = 20
+    spawn_timeout: int = 180  # max seconds before a stalled spawn sentinel is reaped
 
     def __post_init__(self):
         # Validate error_patterns compile as regex

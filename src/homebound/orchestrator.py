@@ -38,6 +38,16 @@ from homebound.tmux import list_windows as tmux_list_windows, output_has_prompt
 logger = logging.getLogger("homebound")
 
 
+def _parse_spawn_task_id(task_name: str) -> int | None:
+    """Extract the item_id from a spawn task name like 'spawn-42'."""
+    if task_name.startswith("spawn-"):
+        try:
+            return int(task_name[6:])
+        except ValueError:
+            return None
+    return None
+
+
 @dataclass
 class StartupWatch:
     """Tracks first-turn startup visibility for newly spawned sessions."""
@@ -111,6 +121,7 @@ class Orchestrator:
             principal_from_fields_fn=self._principal_from_fields,
         )
         self._spawn_tasks: set[asyncio.Task] = set()
+        self._spawn_start_times: dict[int, float] = {}  # item_id → time.monotonic()
         self._consecutive_poll_failures: int = 0
         self._outage_start_time: float | None = None
         self._error_patterns: list[re.Pattern] = [
@@ -314,6 +325,7 @@ class Orchestrator:
     def _cleanup_session(self, item_id: int) -> None:
         """Remove a session and all associated state."""
         self.children.pop(item_id, None)
+        self._spawn_start_times.pop(item_id, None)
         self._prompt_relay.drop_pending_prompts_for_item(item_id)
         self._clear_startup_watch(item_id)
         self._save_children_state()
@@ -633,6 +645,10 @@ class Orchestrator:
                 )
             stripped = self._strip_client_signature(stripped)
 
+            # Strip Slack code formatting (inline `backticks` and ```code blocks```)
+            stripped = re.sub(r"^```\s*|\s*```$", "", stripped).strip()
+            stripped = re.sub(r"^`|`$", "", stripped).strip()
+
             # Check for admin commands before item routing
             admin_match = re.search(self.config.admin_pattern, stripped, re.IGNORECASE)
             if admin_match:
@@ -887,6 +903,7 @@ class Orchestrator:
         sender_extra: dict | None = None, pool_name: str = "",
     ) -> None:
         """Route an item message to an existing child or spawn a new one."""
+        pool_name = pool_name or self.config.default_pool
         max_msg_len = self.config.sessions.max_message_len
         principal = self._principal_from_fields(sender_user_id, sender_extra)
         label = self._item_label(item_id, pool_name)
@@ -980,6 +997,7 @@ class Orchestrator:
 
             # Reserve slot with sentinel
             self.children[item_id] = None
+            self._spawn_start_times[item_id] = time.monotonic()
             task = asyncio.create_task(
                 self._do_spawn(item_id, task_text, mode, sender_user_id, label, pool_name),
                 name=f"spawn-{item_id}",
@@ -1005,6 +1023,7 @@ class Orchestrator:
             if issue_match:
                 child.github_issue_id = int(issue_match.group(1))
             self.children[item_id] = child
+            self._spawn_start_times.pop(item_id, None)
             await self._register_startup_watch(item_id, child, mode)
             self._save_children_state()
             pool_info = f", pool=`{pool_name}`" if pool_name else ""
@@ -1018,17 +1037,44 @@ class Orchestrator:
     def _on_spawn_done(self, task: asyncio.Task) -> None:
         """Callback when a background spawn task completes."""
         self._spawn_tasks.discard(task)
+        item_id = _parse_spawn_task_id(task.get_name())
         if task.cancelled():
             logger.info("Spawn task %s was cancelled", task.get_name())
+            if item_id is not None and self.children.get(item_id) is None:
+                self._cleanup_session(item_id)
+                logger.warning("Cleaned up orphaned sentinel for item %d after cancellation", item_id)
             return
         exc = task.exception()
         if exc is not None:
             logger.error("Unexpected error in spawn task %s: %s", task.get_name(), exc)
-
+        # Safety net: verify sentinel was replaced
+        if item_id is not None and self.children.get(item_id) is None:
+            self._cleanup_session(item_id)
+            logger.error("Sentinel still None after spawn task for item %d — cleaned up", item_id)
 
 
     async def _health_check(self) -> None:
         """Check all children for staleness and verify they're still alive."""
+        # Reap stalled spawn sentinels
+        spawn_timeout = self.config.sessions.spawn_timeout
+        now = time.monotonic()
+        for item_id in list(self._spawn_start_times):
+            if self.children.get(item_id) is not None:
+                # Spawn completed — clean up stale timestamp
+                self._spawn_start_times.pop(item_id, None)
+                continue
+            elapsed = now - self._spawn_start_times[item_id]
+            if elapsed > spawn_timeout:
+                label = self._item_label(item_id)
+                logger.error("%s: spawn stalled for %ds — reaping sentinel", label, int(elapsed))
+                # Cancel the spawn task if still running
+                for t in list(self._spawn_tasks):
+                    if t.get_name() == f"spawn-{item_id}":
+                        t.cancel()
+                        break
+                self._cleanup_session(item_id)
+                await self._post(f":warning: *{label}*: Spawn timed out after `{int(elapsed)}s` — slot freed")
+
         if not self.children:
             return
         idle_timeout = self.config.sessions.idle_timeout
@@ -1160,7 +1206,7 @@ class Orchestrator:
                         child.last_message_at = state["last_message_at"]
                     # Prefer window-inferred pool_name; fall back to saved state
                     # only for legacy AGENT- windows where parsing returns ""
-                    child.pool_name = pool_name or state.get("pool_name", "")
+                    child.pool_name = pool_name or state.get("pool_name", "") or self.config.default_pool
                 else:
                     # No saved state: mark as idle so busy guard doesn't
                     # false-positive for the first busy_recency_seconds.

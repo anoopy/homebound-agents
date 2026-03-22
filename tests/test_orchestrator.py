@@ -2215,3 +2215,122 @@ class TestApiErrorDetection:
             assert "CUSTOM_ERR_42" in msg
 
         asyncio.run(run())
+
+
+class TestSpawnSentinelVerification:
+    """Verify _on_spawn_done cleans up orphaned sentinels (Issue #51)."""
+
+    def _make_orchestrator(self):
+        config = HomeboundConfig()
+        config.security = SecurityConfig(allow_open_channel=True)
+        with patch("homebound.orchestrator.Orchestrator.transport", create=True):
+            from homebound.orchestrator import Orchestrator
+            orch = Orchestrator(config=config, dry_run=True)
+            orch._post = AsyncMock()
+            return orch
+
+    def test_on_spawn_done_cleans_orphaned_sentinel(self):
+        """If spawn task completes but sentinel is still None, clean it up."""
+        orch = self._make_orchestrator()
+        # Simulate sentinel set but never replaced
+        orch.children[42] = None
+
+        # Mock a completed task with the spawn naming convention
+        task = MagicMock()
+        task.get_name.return_value = "spawn-42"
+        task.cancelled.return_value = False
+        task.exception.return_value = None
+        orch._spawn_tasks.add(task)
+
+        orch._on_spawn_done(task)
+
+        # Sentinel should have been cleaned up
+        assert 42 not in orch.children
+
+    def test_on_spawn_done_leaves_valid_child(self):
+        """If spawn task completes and child exists, don't touch it."""
+        orch = self._make_orchestrator()
+        child = ChildInfo(item_id=42, window_name="AGENT-42")
+        orch.children[42] = child
+
+        task = MagicMock()
+        task.get_name.return_value = "spawn-42"
+        task.cancelled.return_value = False
+        task.exception.return_value = None
+        orch._spawn_tasks.add(task)
+
+        orch._on_spawn_done(task)
+
+        # Real child should still be there
+        assert orch.children[42] is child
+
+    def test_on_spawn_done_cleans_sentinel_on_cancellation(self):
+        """Cancelled spawn task with orphaned sentinel should be cleaned up."""
+        orch = self._make_orchestrator()
+        orch.children[42] = None
+
+        task = MagicMock()
+        task.get_name.return_value = "spawn-42"
+        task.cancelled.return_value = True
+        orch._spawn_tasks.add(task)
+
+        orch._on_spawn_done(task)
+
+        assert 42 not in orch.children
+
+
+class TestSpawnTimeoutWatchdog:
+    """Verify _health_check reaps stalled spawn sentinels (Issue #49)."""
+
+    def _make_orchestrator(self):
+        config = HomeboundConfig()
+        config.security = SecurityConfig(allow_open_channel=True)
+        with patch("homebound.orchestrator.Orchestrator.transport", create=True):
+            from homebound.orchestrator import Orchestrator
+            orch = Orchestrator(config=config, dry_run=True)
+            orch._post = AsyncMock()
+            return orch
+
+    def test_stalled_sentinel_reaped_after_timeout(self):
+        """Sentinel persisting past spawn_timeout should be cleaned up and Slack notified."""
+        orch = self._make_orchestrator()
+        orch.config.sessions.spawn_timeout = 10  # short timeout for test
+
+        # Simulate a sentinel that was set 20s ago (past the 10s timeout)
+        orch.children[99] = None
+        orch._spawn_start_times[99] = time.monotonic() - 20
+
+        async def run():
+            with patch("homebound.orchestrator.tmux_list_windows", new_callable=AsyncMock, return_value=[]):
+                await orch._health_check()
+
+        asyncio.run(run())
+
+        # Sentinel should have been reaped
+        assert 99 not in orch.children
+        assert 99 not in orch._spawn_start_times
+        # Slack should have been notified
+        orch._post.assert_awaited()
+        msg = orch._post.call_args.args[0]
+        assert "timed out" in msg.lower()
+
+    def test_normal_spawn_not_reaped(self):
+        """Sentinel within timeout should not be reaped."""
+        orch = self._make_orchestrator()
+        orch.config.sessions.spawn_timeout = 180
+
+        # Simulate a sentinel that was set just now (well within timeout)
+        orch.children[99] = None
+        orch._spawn_start_times[99] = time.monotonic()
+
+        async def run():
+            with patch("homebound.orchestrator.tmux_list_windows", new_callable=AsyncMock, return_value=[]):
+                await orch._health_check()
+
+        asyncio.run(run())
+
+        # Sentinel should still be there
+        assert 99 in orch.children
+        assert 99 in orch._spawn_start_times
+        # No Slack notification about timeout
+        orch._post.assert_not_awaited()

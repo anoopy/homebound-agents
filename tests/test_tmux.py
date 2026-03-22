@@ -14,7 +14,7 @@ def test_wait_for_prompt_detects_marker():
         patch(
             "homebound.tmux.run_tmux",
             new_callable=AsyncMock,
-            return_value=(0, "booting\nready > ", ""),
+            return_value=(0, "booting\n> ready", ""),
         ),
     ):
         ready = asyncio.run(wait_for_prompt("homebound:CLAUDE-240", timeout=2, idle_markers=["> "]))
@@ -157,3 +157,26 @@ def test_send_keys_skips_cancel_when_not_in_copy_mode():
     assert result is True
     # Should NOT have sent -X cancel
     assert not any("-X" in args and "cancel" in args for args in call_log)
+
+
+def test_wait_for_prompt_fails_when_extended_wait_exhausted():
+    """Extended wait should return False when output seen but no marker after 2x timeout."""
+    from homebound.tmux import wait_for_prompt
+
+    with (
+        patch("homebound.tmux.asyncio.sleep", new_callable=AsyncMock),
+        patch(
+            "homebound.tmux.run_tmux",
+            new_callable=AsyncMock,
+            # All polls return output but never a prompt marker
+            side_effect=[
+                (0, "starting runtime...", ""),
+                (0, "still starting...", ""),
+                # Extended wait (2 more polls for timeout=2 → extended to 4)
+                (0, "loading modules...", ""),
+                (0, "still loading...", ""),
+            ],
+        ),
+    ):
+        ready = asyncio.run(wait_for_prompt("homebound:CLAUDE-240", timeout=2, idle_markers=["PROMPT>"]))
+    assert ready is False

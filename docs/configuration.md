@@ -145,6 +145,7 @@ Pool names must be alphabetic. Each pool entry has the same fields as `runtime:`
 | `close_grace_period` | `2.0` | Seconds to wait after sending exit command |
 | `outage_threshold` | `3` | Consecutive poll failures before adaptive backoff |
 | `outage_max_interval` | `120` | Max poll interval during outage (seconds) |
+| `spawn_timeout` | `180` | Max seconds before a stalled spawn sentinel is reaped |
 
 ### `routing`
 
