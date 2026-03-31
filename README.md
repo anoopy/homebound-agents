@@ -2,6 +2,10 @@
 
 **Command your local AI agents from anywhere.**
 
+## Demo
+
+https://github.com/user-attachments/assets/e0f9f19b-ccb0-4715-b704-90fba7895937
+
 A Python orchestrator that lets you control AI coding agents running on your local machine via Slack. Send commands from anywhere, and homebound routes them to agent sessions managed in tmux — with smart routing, multi-model support, multi-agent parallelism, and crash recovery.
 
 ```
