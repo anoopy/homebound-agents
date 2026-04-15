@@ -28,7 +28,7 @@ Sessions survive network drops and orchestrator restarts, and everything is obse
 
 ## Features
 
-- **Smart routing** — with `ANTHROPIC_API_KEY` set and `llm_routing: true`, bare messages are automatically classified by Claude Haiku to the right session. No `@Agent1` prefixes needed — just type naturally and homebound figures out which agent should handle it.
+- **Smart routing** — with `ANTHROPIC_API_KEY` set and `inference_engine: true`, bare messages are automatically classified by a unified inference engine to the right session. No `@Agent1` prefixes needed — just type naturally and homebound figures out which agent should handle it. Also supports batch decomposition of multi-part requests.
 - **Multi-model pools** — run Claude Code and Codex (or any CLI) simultaneously with named pools (`@Claude1`, `@Codex1`), sharing a single slot pool
 - **Multi-session** — up to N concurrent agents in tmux, addressed via `@Agent` or `@Agent1` (configurable via `sessions.agent_label`)
 - **Crash recovery** — state persistence (`children.json`), orphan re-adoption on restart
@@ -121,10 +121,11 @@ runtime:
 #     idle_markers: ["›"]
 
 routing:
-  llm_routing: true  # Recommended — requires ANTHROPIC_API_KEY
+  inference_engine: true  # Recommended — unified tool-use routing + batch decomposition (requires ANTHROPIC_API_KEY)
+  llm_routing: true       # Fallback — Haiku classification if inference engine is off or unavailable
 ```
 
-> **Recommended:** Enable `llm_routing` for the best message routing. Without it, bare messages are routed via keyword matching (always on) and thread replies — keyword matching scores overlap between your message and each session's context, routing to the best match. With LLM routing also enabled, Claude Haiku adds semantic classification for ambiguous messages that keywords miss — so you can type "what about the auth bug?" and it routes to the right agent even without keyword overlap.
+> **Recommended:** Enable `inference_engine` for the best message routing. It uses a single tool-use call to route, spawn, batch-decompose, or ignore messages — replacing the older keyword + LLM cascade with a unified decision. With `llm_routing` as fallback, Claude Haiku still handles ambiguous messages if the inference engine is disabled. Without either, bare messages fall back to keyword matching (always on) and thread replies.
 
 ### 6. Set your tokens
 
@@ -137,6 +138,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 `homeboundctl.sh` sources this file automatically and injects the tokens into the tmux environment. `SLACK_BOT_TOKEN` and `ANTHROPIC_API_KEY` are used by the orchestrator directly. `SLACK_CHANNEL_ID` is passed to child agent sessions so they can post results back to Slack via `scripts/slack_post.sh`. The script also inherits your shell's PATH from `~/.zshrc` or `~/.bash_profile`, so tools like `tmux`, `jq`, and `curl` are found even in non-interactive contexts.
+
+> **Authentication note:** `ANTHROPIC_API_KEY` is required for the inference engine and LLM routing. Per Anthropic's [authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use), developers building products/services should use API key auth, not OAuth. If `ANTHROPIC_API_KEY` is not set, homebound falls back to the CLI's OAuth token (from `~/.claude/`), but this token expires and requires periodic `/login` refreshes. The code includes retry-on-401 logic as a safety net, but API key auth is strongly recommended.
 
 ### 7. Start
 
