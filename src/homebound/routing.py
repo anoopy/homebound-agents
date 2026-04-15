@@ -18,6 +18,14 @@ from homebound.tmux import output_has_prompt
 logger = logging.getLogger("homebound")
 
 
+def _ts_sort_key(ts: str) -> float:
+    """Convert a Slack ts string into a numeric sort key."""
+    try:
+        return float(ts)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class RoutingEngine:
     """Stateful message router: thread lookup, keyword scoring, LLM matching.
 
@@ -176,7 +184,7 @@ class RoutingEngine:
             candidates.append(ts)
 
         # Newest-first (largest ts value first), cap at max_threads
-        candidates.sort(reverse=True)
+        candidates.sort(key=_ts_sort_key, reverse=True)
         return candidates[:max_threads]
 
     # ------------------------------------------------------------------
@@ -300,14 +308,23 @@ class RoutingEngine:
         )
 
         try:
+            import anthropic
             if self._anthropic_client is None:
-                import anthropic
                 self._anthropic_client = anthropic.Anthropic()
-            response = self._anthropic_client.messages.create(
-                model=self.config.routing.llm_model,
-                max_tokens=50,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            try:
+                response = self._anthropic_client.messages.create(
+                    model=self.config.routing.llm_model,
+                    max_tokens=50,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            except anthropic.AuthenticationError:
+                logger.warning("Anthropic auth expired in routing, refreshing client")
+                self._anthropic_client = anthropic.Anthropic()
+                response = self._anthropic_client.messages.create(
+                    model=self.config.routing.llm_model,
+                    max_tokens=50,
+                    messages=[{"role": "user", "content": prompt}],
+                )
             answer = response.content[0].text.strip().lower()
             answer = answer.strip(".*:- ")
             if re.search(r"\bnone\b", answer):
@@ -367,7 +384,7 @@ class RoutingEngine:
         # Prune global map
         if len(self._message_session_map) > max_size:
             to_keep = max_size * 3 // 4
-            all_ts = sorted(self._message_session_map.keys())
+            all_ts = sorted(self._message_session_map.keys(), key=_ts_sort_key)
             for old_ts in all_ts[:-to_keep]:
                 del self._message_session_map[old_ts]
 

@@ -141,6 +141,19 @@ class PromptRelayManager:
         if latest_option_idx is None:
             return None
 
+        # Guard: the option block must be near the bottom of the output.
+        # Real runtime prompts appear just before the cursor. If there are
+        # substantive content lines after the options, this is just a
+        # numbered list in Claude's regular response — not a prompt.
+        max_trailing = 5  # allow a few blank/status/idle lines after options
+        trailing_content = 0
+        for idx in range(latest_option_idx + 1, len(lines)):
+            stripped = lines[idx].strip()
+            if stripped and not re.match(r'^[❯›>\s✻⏵⏺]*$', stripped):
+                trailing_content += 1
+        if trailing_content > max_trailing:
+            return None
+
         options_rev: list[str] = []
         block_start = latest_option_idx
         idx = latest_option_idx
@@ -332,8 +345,9 @@ class PromptRelayManager:
 
         await send_to_child(
             child,
-            f"Runtime prompt response: {answer_value}",
+            answer_value,
             self.config,
+            raw=True,
         )
         child.idle_warnings = 0
         prompts = [p for p in prompts if p.prompt_id != prompt.prompt_id]

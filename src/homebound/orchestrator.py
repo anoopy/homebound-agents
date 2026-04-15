@@ -20,6 +20,7 @@ from homebound.adapters.transport import Transport
 from homebound.admin import AdminCommandHandler, format_duration
 from homebound.config import HomeboundConfig
 from homebound.prompt_relay import PendingPrompt, PromptRelayManager
+from homebound.inference import InferenceEngine, InferenceResult, BatchTask
 from homebound.routing import RoutingEngine
 from homebound.security import CommandAction, CommandPolicy, Principal
 from homebound.session import (
@@ -107,6 +108,16 @@ class Orchestrator:
             pending_prompts_fn=self._prompt_relay.active_prompts_for_item,
             save_state_fn=self._save_children_state,
         )
+        # Unified inference engine (optional, replaces keyword + LLM routing)
+        self._inference: InferenceEngine | None = None
+        if config.routing.inference_engine:
+            self._inference = InferenceEngine(
+                config=config,
+                children=self.children,
+                recent_messages_fn=lambda: self._router._recent_messages,
+                is_busy_fn=self._router.is_busy,
+                next_free_slot_fn=self._router.next_free_slot,
+            )
         # Admin command handler (extracted module)
         self._admin = AdminCommandHandler(
             config=config,
@@ -176,6 +187,8 @@ class Orchestrator:
                 "posted_message_ts": child.posted_message_ts[-50:],
                 "github_issue_id": child.github_issue_id,
                 "pool_name": child.pool_name,
+                "agent_session_id": child.agent_session_id,
+                "session_label": child.session_label,
             }
         try:
             tmp = self._state_file.with_suffix(".tmp")
@@ -203,6 +216,8 @@ class Orchestrator:
                     "posted_message_ts": v.get("posted_message_ts", []),
                     "github_issue_id": v.get("github_issue_id"),
                     "pool_name": v.get("pool_name", ""),
+                    "agent_session_id": v.get("agent_session_id", ""),
+                    "session_label": v.get("session_label", ""),
                 }
                 result[int(k)] = entry
             return result
@@ -329,6 +344,12 @@ class Orchestrator:
         self._prompt_relay.drop_pending_prompts_for_item(item_id)
         self._clear_startup_watch(item_id)
         self._save_children_state()
+        # Drain inference queue if slots freed up
+        if self._inference is not None:
+            try:
+                asyncio.get_running_loop().create_task(self._drain_inference_queue())
+            except RuntimeError:
+                pass  # No running loop (e.g., called from test or sync context)
 
     def _mark_startup_signal(self, item_id: int, source: str) -> None:
         watch = self._startup_watch.get(item_id)
@@ -562,8 +583,10 @@ class Orchestrator:
         """Single iteration: check transport messages and child health."""
         self._poll_cycles += 1
         self._prompt_relay.expire_pending_prompts()
+        if self._inference is not None:
+            self._inference.expire_batches()
         lookback = self.config.transport.lookback_minutes
-        since_ts = min(self._last_poll_ts, time.time() - (lookback * 60))
+        since_ts = max(self._last_poll_ts, time.time() - (lookback * 60))
         poll_limit = self.config.transport.poll_limit
 
         transport_ok = False
@@ -673,6 +696,15 @@ class Orchestrator:
                         announce_denied=True,
                     )
                     continue
+
+            # Resolve Slack <@USERID> mentions to @PoolLabel for role parsing
+            mention_map = self.config.slack_mention_to_pool
+            if mention_map:
+                def _resolve_mention(m: re.Match) -> str:
+                    uid = m.group(1).split("|")[0]  # Handle <@UID|label> format
+                    pool = mention_map.get(uid)
+                    return f"@{self.config.pool_label(pool)}" if pool else m.group(0)
+                stripped = re.sub(r"<@([^>]+)>", _resolve_mention, stripped)
 
             # @<pool_label> command handling (e.g., @Claude1, @Codex, @Agent1)
             role_command = self._parse_role_command(stripped)
@@ -796,6 +828,99 @@ class Orchestrator:
                         label = self._item_label(thread_item_id)
                         logger.debug("Thread route to %s denied for %s", label, sender_id)
                         continue  # Block — don't fall through to keyword/LLM
+
+            # --- Inference engine (replaces Tiers 2-4 when enabled) ---
+            if self._inference is not None:
+                # Check for pending batch confirmation first
+                pending = self._inference.get_pending_batch_for_user(sender_id)
+                if pending is not None:
+                    batch_action, batch_tasks = await self._inference.handle_batch_response(
+                        stripped, sender_id,
+                    )
+                    if batch_action == "confirmed" and batch_tasks:
+                        await self._dispatch_batch(batch_tasks, sender_id, msg.extra)
+                        continue
+                    elif batch_action == "cancelled":
+                        await self._post(":x: Batch dispatch cancelled.")
+                        continue
+                    elif batch_action == "modified":
+                        # Modification requested — re-infer to get new task decomposition
+                        re_result = await self._inference.infer(stripped)
+                        if re_result.action == "batch" and re_result.tasks:
+                            await self._present_batch_for_confirmation(
+                                re_result.tasks, sender_id, stripped,
+                            )
+                        else:
+                            await self._post(
+                                ":warning: Couldn't parse the modification. "
+                                "Please restate your full request."
+                            )
+                        continue
+                    # "unrelated" falls through to normal inference
+
+                result = await self._inference.infer(stripped)
+
+                if result.action == "route" and result.target_item_id is not None:
+                    item_id = result.target_item_id
+                    if item_id in self.children and self.children[item_id] is not None:
+                        if await self._router.is_busy(item_id):
+                            label = self._item_label(item_id)
+                            logger.info(
+                                "Inference route target %s is busy, spawning new",
+                                label,
+                            )
+                            # Fall through to spawn
+                        else:
+                            child = self.children[item_id]
+                            route_decision = self.command_policy.evaluate(
+                                CommandAction.SESSION_ROUTE, principal,
+                                owner_user_id=child.owner_user_id,
+                            )
+                            if route_decision.allow:
+                                await send_to_child(child, stripped, self.config)
+                                child.idle_warnings = 0
+                                label = self._item_label(item_id)
+                                await self._post(
+                                    f":dart: *{label}*: Routed via inference",
+                                    item_id=item_id,
+                                )
+                                logger.info("Inference-routed message to %s", label)
+                                continue
+                            else:
+                                logger.debug(
+                                    "Inference route to %s denied for %s",
+                                    result.target_label, sender_id,
+                                )
+                                continue
+
+                if result.action == "batch" and result.tasks:
+                    await self._present_batch_for_confirmation(
+                        result.tasks, sender_id, stripped,
+                    )
+                    continue
+
+                if result.action == "none":
+                    logger.debug("Inference returned 'none', ignoring: %s", result.reasoning)
+                    continue
+
+                # action == "spawn" or route that fell through
+                pool = result.pool_name or self.config.default_pool
+                slot = self._router.next_free_slot()
+                if slot is not None:
+                    await self._handle_issue_message(
+                        slot, stripped,
+                        sender_user_id=sender_id, sender_extra=msg.extra,
+                        pool_name=pool,
+                    )
+                else:
+                    await self._post(
+                        f":no_entry_sign: At capacity "
+                        f"(`{len(self.children)}/{self.max_children}`). "
+                        f"Please resend when a slot opens."
+                    )
+                continue
+
+            # --- Legacy routing (Tiers 2-4, when inference engine is disabled) ---
 
             # Tier 2: Keyword-based matching
             if self.config.routing.keyword_routing and self.children:
@@ -1027,7 +1152,18 @@ class Orchestrator:
             await self._register_startup_watch(item_id, child, mode)
             self._save_children_state()
             pool_info = f", pool=`{pool_name}`" if pool_name else ""
-            await self._post(f":rocket: *{label}*: New session started (`{mode}`{pool_info})", item_id=item_id)
+            name_info = f" `{child.session_label}`" if child.session_label else ""
+            resume_info = ""
+            if child.agent_session_id:
+                rt = self.config.get_runtime(pool_name)
+                resume_cmd = rt.resume_command(child.agent_session_id)
+                if resume_cmd:
+                    resume_info = f"\n> Resume: `{resume_cmd}`"
+            await self._post(
+                f":rocket: *{label}*{name_info}: New session started"
+                f" (`{mode}`{pool_info}){resume_info}",
+                item_id=item_id,
+            )
             logger.info("Spawned child for %s (mode=%s, pool=%s)", label, mode, pool_name or "default")
         except Exception as e:
             self._cleanup_session(item_id)
@@ -1052,6 +1188,113 @@ class Orchestrator:
             self._cleanup_session(item_id)
             logger.error("Sentinel still None after spawn task for item %d — cleaned up", item_id)
 
+    # --- Inference engine helpers ---
+
+    async def _present_batch_for_confirmation(
+        self, tasks: list[BatchTask], sender_user_id: str, original_message: str,
+    ) -> None:
+        """Post a formatted batch summary to Slack and register a PendingBatch."""
+        lines = [":clipboard: *Batch dispatch plan:*\n"]
+        for i, task in enumerate(tasks, 1):
+            pool = task.pool_name or self.config.default_pool
+            target = task.target_label or f"new {pool.capitalize()} agent"
+            lines.append(f"  {i}. `{target}`: {task.task_text[:200]}")
+        lines.append(f"\n:speech_balloon: Reply *go* to proceed, *cancel* to abort, or describe changes.")
+        msg = "\n".join(lines)
+        confirmation_ts = await self._post(msg)
+        if not confirmation_ts:
+            await self._post(":warning: Failed to post batch plan. Please try again.")
+            return
+        if self._inference:
+            self._inference.create_pending_batch(
+                tasks, sender_user_id, original_message, confirmation_ts,
+            )
+
+    async def _dispatch_batch(
+        self, tasks: list[BatchTask], sender_user_id: str,
+        sender_extra: dict | None = None,
+    ) -> None:
+        """Dispatch confirmed batch tasks, spawning agents and queuing overflow."""
+        dispatched = 0
+        queued = 0
+        for task in tasks:
+            if task.target_item_id is not None:
+                child = self.children.get(task.target_item_id)
+                if child is not None:
+                    label = self._item_label(task.target_item_id)
+                    # Auth check
+                    principal = self._principal_from_fields(sender_user_id, sender_extra)
+                    route_decision = self.command_policy.evaluate(
+                        CommandAction.SESSION_ROUTE, principal,
+                        owner_user_id=child.owner_user_id,
+                    )
+                    if not route_decision.allow:
+                        logger.debug("Batch route to %s denied for %s", label, sender_user_id)
+                        continue
+                    # Busy check
+                    if await self._router.is_busy(task.target_item_id):
+                        # Target is busy, spawn new agent instead
+                        pool = task.pool_name or self.config.default_pool
+                        slot = self._router.next_free_slot()
+                        if slot is not None:
+                            await self._handle_issue_message(
+                                slot, task.task_text,
+                                sender_user_id=sender_user_id, sender_extra=sender_extra,
+                                pool_name=pool,
+                            )
+                            dispatched += 1
+                        else:
+                            if self._inference:
+                                self._inference.enqueue_tasks([task], sender_user_id)
+                            queued += 1
+                        continue
+                    await send_to_child(child, task.task_text, self.config)
+                    child.idle_warnings = 0
+                    await self._post(
+                        f":arrow_right: *{label}*: Batch task dispatched",
+                        item_id=task.target_item_id,
+                    )
+                    dispatched += 1
+                    continue
+
+            pool = task.pool_name or self.config.default_pool
+            slot = self._router.next_free_slot()
+            if slot is not None:
+                await self._handle_issue_message(
+                    slot, task.task_text,
+                    sender_user_id=sender_user_id, sender_extra=sender_extra,
+                    pool_name=pool,
+                )
+                dispatched += 1
+            else:
+                if self._inference:
+                    self._inference.enqueue_tasks([task], sender_user_id)
+                queued += 1
+
+        summary = f":white_check_mark: Batch dispatched: {dispatched} task(s) started"
+        if queued:
+            summary += f", {queued} queued (will auto-start as slots free up)"
+        await self._post(summary)
+
+    async def _drain_inference_queue(self) -> None:
+        """Spawn queued tasks when slots become available."""
+        if self._inference is None:
+            return
+        while True:
+            slot = self._router.next_free_slot()
+            if slot is None:
+                break
+            items = self._inference.drain_queue(max_tasks=1)
+            if not items:
+                break
+            task, sender_uid = items[0]
+            pool = task.pool_name or self.config.default_pool
+            label = self._item_label(slot, pool)
+            await self._post(f":inbox_tray: *{label}*: Starting queued task…")
+            await self._handle_issue_message(
+                slot, task.task_text,
+                sender_user_id=sender_uid, pool_name=pool,
+            )
 
     async def _health_check(self) -> None:
         """Check all children for staleness and verify they're still alive."""
@@ -1083,8 +1326,14 @@ class Orchestrator:
         # Fetch window list once for all children
         try:
             windows = await tmux_list_windows(self.config.tmux_session_name)
-        except Exception:
-            windows = []
+        except Exception as e:
+            logger.warning("Health check skipped liveness reap: could not list tmux windows: %s", e)
+            return
+        if not windows and any(child is not None for child in self.children.values()):
+            logger.warning(
+                "Health check skipped liveness reap: tmux window list is empty while sessions are tracked"
+            )
+            return
         window_set = set(windows)
 
         for item_id, child in list(self.children.items()):
@@ -1156,6 +1405,11 @@ class Orchestrator:
 
             found_error = False
             for line in output.splitlines():
+                stripped_line = line.strip()
+                # Skip prompt echo lines — these contain our own instructions
+                # and may include error keywords as examples (e.g. "permission denied")
+                if stripped_line.startswith("❯") or "--- BEGIN TASK ---" in stripped_line:
+                    continue
                 for pattern in self._error_patterns:
                     if pattern.search(line):
                         line_hash = hashlib.sha256(line.strip().encode()).hexdigest()
@@ -1216,6 +1470,18 @@ class Orchestrator:
                 child.recent_keywords = saved.get("recent_keywords", [])
                 child.posted_message_ts = saved.get("posted_message_ts", [])
                 child.github_issue_id = saved.get("github_issue_id")
+                child.agent_session_id = saved.get("agent_session_id", "")
+                child.session_label = saved.get("session_label", "")
+                # Attempt discovery for runtimes that support it when no saved ID
+                if not child.agent_session_id:
+                    try:
+                        rt = self.config.get_runtime(pool_name)
+                        if hasattr(rt, "discover_session_id"):
+                            child.agent_session_id = await rt.discover_session_id(
+                                self.config.tmux_session_name, child.window_name,
+                            )
+                    except Exception:
+                        pass
                 self.children[item_id] = child
                 adopted.append(self._item_label(item_id, pool_name))
                 logger.info("Re-adopted orphan session %s", self._item_label(item_id, pool_name))
