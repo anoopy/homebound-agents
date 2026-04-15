@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,8 @@ class ChildInfo:
     active_thread_ts: str = ""  # Thread ts for replies routed via Tier 1 thread routing
     last_reported_error_hash: str = ""  # SHA256 of last reported API error (dedup)
     pool_name: str = ""  # Runtime pool this session belongs to (e.g., "claude", "codex")
+    agent_session_id: str = ""  # CLI-specific session UUID (for resume outside tmux)
+    session_label: str = ""  # Human-readable name: hb-{pool}-{slot}-{MMDD}
 
     def is_stale(self, timeout: int) -> bool:
         """Check if the child has been idle longer than timeout seconds."""
@@ -79,6 +82,11 @@ def session_name(config: HomeboundConfig, item_id: int, pool_name: str = "") -> 
     """Generate child agent name for transport identity."""
     pool = pool_name or config.default_pool
     return f"{config.pool_session_prefix(pool)}{item_id}"
+
+
+def generate_session_label(pool_name: str, item_id: int) -> str:
+    """Generate human-readable session label: hb-{pool}-{slot}-{MMDD}."""
+    return f"hb-{pool_name}-{item_id}-{datetime.now().strftime('%m%d')}"
 
 
 def _item_label(config: HomeboundConfig, item_id: int, pool_name: str = "") -> str:
@@ -172,14 +180,25 @@ async def spawn_child(
     wname = window_name(config, item_id, pool_name)
     target = f"{tmux_session}:{wname}"
 
+    # Generate session label and pre-assign UUID for runtimes that support it
+    effective_pool = pool_name or config.default_pool
+    slabel = generate_session_label(effective_pool, item_id)
+    agent_session_id = ""
+    if runtime.supports_session_resume():
+        agent_session_id = str(uuid.uuid4())
+
     # Create new tmux window
     await new_window(tmux_session, wname)
 
     try:
-        # Start the CLI via runtime adapter
+        # Start the CLI via runtime adapter (passes session_id + name to
+        # runtimes that support them; others ignore the extra args)
         rc, _, err = await run_tmux(
             "send-keys", "-t", target,
-            runtime.start_command(project_dir), "Enter",
+            runtime.start_command(
+                project_dir, session_id=agent_session_id, session_name=slabel,
+            ),
+            "Enter",
         )
         if rc != 0:
             raise RuntimeError(f"Failed to start CLI in window {wname}: {err}")
@@ -196,6 +215,15 @@ async def spawn_child(
                 f"after {config.sessions.init_timeout}s"
             )
 
+        # For runtimes that need post-launch session ID discovery (e.g. Codex)
+        if not agent_session_id and hasattr(runtime, "discover_session_id"):
+            try:
+                agent_session_id = await runtime.discover_session_id(
+                    tmux_session, wname,
+                )
+            except Exception:
+                logger.debug("Could not discover session ID for %s", wname)
+
         # Build the initial prompt based on mode
         initial_prompt = _build_prompt(item_id, task_text, mode, config, pool_name)
         logger.info("%s: using %s mode", label, mode)
@@ -209,7 +237,12 @@ async def spawn_child(
         raise
 
     child = ChildInfo(item_id=item_id, window_name=wname, pool_name=pool_name)
-    logger.info("Spawned child session for %s in window %s", label, wname)
+    child.agent_session_id = agent_session_id
+    child.session_label = slabel
+    logger.info(
+        "Spawned child session for %s in window %s (label=%s, session_id=%s)",
+        label, wname, slabel, agent_session_id[:8] if agent_session_id else "none",
+    )
     return child
 
 
@@ -230,7 +263,7 @@ def _build_prompt(
     # Prepare template variables
     sid = session_name(config, item_id, pool_name)
     post_command = config.transport.post_command_template.format(
-        session_name=sid, message="your message", thread_ts="",
+        session_name=sid, item_label=label, message="your message", thread_ts="",
     )
 
     clean_text = _sanitize_text(
@@ -266,33 +299,38 @@ async def send_to_child(
     message: str,
     config: HomeboundConfig,
     thread_ts: str = "",
+    raw: bool = False,
 ) -> None:
     """Route a follow-up message to an existing child session.
 
     Updates the child's last_message_at timestamp.
+    When *raw* is True, the message is sent as-is (no task wrapper).
+    Use raw=True for prompt answers that should be bare keystrokes.
     """
     target = f"{config.tmux_session_name}:{child.window_name}"
-    sid = session_name(config, child.item_id, child.pool_name)
     label = _item_label(config, child.item_id, child.pool_name)
 
-    message = _sanitize_text(
-        message, config.sessions.max_message_len,
-        label="follow-up", item_id=child.item_id, item_label=label,
-    )
+    if raw:
+        text = message
+    else:
+        sid = session_name(config, child.item_id, child.pool_name)
+        message = _sanitize_text(
+            message, config.sessions.max_message_len,
+            label="follow-up", item_id=child.item_id, item_label=label,
+        )
+        post_cmd = config.transport.post_command_template.format(
+            session_name=sid, item_label=label, message="your status message", thread_ts=thread_ts,
+        )
+        text = (
+            f"Follow-up for {label}: "
+            f"--- BEGIN TASK --- {message} --- END TASK --- "
+            f"Format your Slack response with mrkdwn: *bold* headings, bullet lists, "
+            f"`code` for values, and clear sections. "
+            f"Use emojis sparingly — only in section headers or one-liner status lines, not in body text. "
+            f"Post your results using: {post_cmd}"
+        )
 
-    post_cmd = config.transport.post_command_template.format(
-        session_name=sid, message="your status message", thread_ts=thread_ts,
-    )
-    wrapped = (
-        f"Follow-up for {label}: "
-        f"--- BEGIN TASK --- {message} --- END TASK --- "
-        f"Format your Slack response with mrkdwn: *bold* headings, bullet lists, "
-        f"`code` for values, and clear sections. "
-        f"Use emojis sparingly — only in section headers or one-liner status lines, not in body text. "
-        f"Post your results using: {post_cmd}"
-    )
-
-    success = await send_keys(target, wrapped)
+    success = await send_keys(target, text)
     if success:
         child.last_message_at = datetime.now()
         logger.info("Routed message to %s", label)

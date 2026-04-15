@@ -45,16 +45,33 @@ class AgentRuntime(ABC):
         self._unset_prefix = f"{unset_parts} && " if unset_parts else ""
         self._env_overrides: dict[str, str | None] = {v: None for v in self._env_unset}
 
-    def start_command(self, project_dir: Path) -> str:
+    def start_command(
+        self, project_dir: Path, session_id: str = "", session_name: str = "",
+    ) -> str:
         """Return the shell command to start the CLI in a tmux window.
 
         Args:
             project_dir: Absolute path to the project working directory.
+            session_id: Optional pre-assigned session UUID (used by runtimes
+                that support it, ignored otherwise).
+            session_name: Optional human-readable session label (used by
+                runtimes that support it, ignored otherwise).
 
         Returns:
             A shell command string (passed to tmux send-keys).
         """
         return f"cd {shlex.quote(str(project_dir))} && {self._unset_prefix}{self.command}"
+
+    def supports_session_resume(self) -> bool:
+        """Whether this runtime supports session resumption."""
+        return False
+
+    def resume_command(self, session_id: str) -> str:
+        """Return the CLI command a user would run to resume this session.
+
+        Returns an empty string if the runtime doesn't support resume.
+        """
+        return ""
 
     @abstractmethod
     def idle_prompt_markers(self) -> list[str]:

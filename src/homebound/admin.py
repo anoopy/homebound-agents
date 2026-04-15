@@ -214,9 +214,20 @@ class AdminCommandHandler:
             if len(topic) > 50:
                 topic = topic[:50].rsplit(" ", 1)[0] + "…"
             topic_tag = f" — _{topic}_" if topic else ""
+            name_tag = f" `{child.session_label}`" if child.session_label else ""
+            resume_tag = ""
+            if child.agent_session_id:
+                try:
+                    rt = self.config.get_runtime(child.pool_name)
+                    resume_cmd = rt.resume_command(child.agent_session_id)
+                    if resume_cmd:
+                        resume_tag = f"\n>  resume: `{resume_cmd}`"
+                except Exception:
+                    pass
             lines.append(
-                f">*{self._item_label(item_id)}*{topic_tag}\n"
+                f">*{self._item_label(item_id)}*{name_tag}{topic_tag}\n"
                 f">  up `{uptime_str}`, idle `{idle_str}` · `{last_line}`"
+                f"{resume_tag}"
             )
         await self._post("\n".join(lines))
 

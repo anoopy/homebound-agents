@@ -47,7 +47,7 @@ class TransportConfig:
     message_format: str = "*[{name}]* {message}"
     strip_prefixes: list[str] = field(default_factory=lambda: ["claude-desktop"])
     ignored_prefixes: list[str] = field(default_factory=list)
-    post_command_template: str = "echo '[{session_name}] {message}'"
+    post_command_template: str = "echo '[{item_label}] {message}'"
     http_timeout: int = 10
     poll_limit: int = 20
 
@@ -72,6 +72,7 @@ class RuntimeConfig:
     idle_markers: list[str] = field(default_factory=lambda: ["\u276f", "> "])
     exit_command: str = "/exit"
     env_unset: list[str] = field(default_factory=lambda: ["CLAUDECODE"])
+    slack_mention_ids: list[str] = field(default_factory=list)  # Slack user/app IDs that target this pool
 
 
 @dataclass
@@ -95,6 +96,13 @@ class SessionsConfig:
         r"(?i)overloaded_error",
         r"(?i)rate\s*limit\s*(exceeded|error)",
         r"(?i)connection\s*(refused|reset|timed?\s*out)",
+        r"(?i)permission\s+denied",
+        r"(?i)fatal:\s+",
+        r"(?i)error:\s+command\s+failed",
+        r"(?i)EACCES|ENOENT|EPERM",
+        r"(?i)traceback\s+\(most\s+recent",
+        r"(?i)panic:",
+        r"(?i)segmentation\s+fault",
     ])
     error_scan_lines: int = 20
     spawn_timeout: int = 180  # max seconds before a stalled spawn sentinel is reaped
@@ -120,7 +128,7 @@ class PromptRelayConfig:
     poll_every_cycles: int = 1
     option_patterns: list[str] = field(
         default_factory=lambda: [
-            r"^\s*\d+[\)\.\:]\s*(.+)$",
+            r"^[\s›]*\d+[\)\.\:]\s*(.+)$",
             r"^\s*[A-Za-z][\)\.]\s*(.+)$",
             r"^\s*-\s\[[ xX]\]\s*(.+)$",
         ]
@@ -184,6 +192,10 @@ class RoutingConfig:
     thread_poll_max_threads: int = 10  # Max threads polled per cycle
     busy_recency_seconds: int = 30  # Agent is "busy" if messaged within this window
     busy_check_tmux: bool = False  # Also check tmux idle markers (slower, more accurate)
+    inference_engine: bool = False           # Toggle for unified inference engine
+    inference_model: str = "claude-sonnet-4-6"  # Model for inference (empty = use llm_model)
+    batch_confirm_timeout: int = 300         # Seconds before a pending batch expires (5 min)
+    batch_max_tasks: int = 10               # Max tasks in a single batch decomposition
 
 
 _SLACK_FORMATTING_RULES = (
@@ -322,6 +334,18 @@ class HomeboundConfig:
     def pool_session_prefix(self, pool_name: str) -> str:
         """Transport session prefix for a pool (e.g., 'claude' → 'claude-')."""
         return f"{pool_name.lower()}-"
+
+    @property
+    def slack_mention_to_pool(self) -> dict[str, str]:
+        """Map Slack user/app IDs to pool names for mention resolution.
+
+        Returns e.g. {"U0AK0THLXU3": "claude", "U0BXYZ": "codex"}.
+        """
+        result: dict[str, str] = {}
+        for pool_name, rt_cfg in self.runtimes.items():
+            for uid in rt_cfg.slack_mention_ids:
+                result[uid] = pool_name
+        return result
 
     def __post_init__(self):
         # Adapter instance caches (not dataclass fields)

@@ -287,6 +287,93 @@ case "$CMD" in
     echo ""
     ;;
 
+  sessions)
+    STATE_FILE="${LOG_DIR}/children.json"
+    if [ ! -f "$STATE_FILE" ]; then
+      echo "No children.json found at ${STATE_FILE}"
+      exit 1
+    fi
+    echo "=== Active Sessions ==="
+    $PY - "$STATE_FILE" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    state = json.load(f)
+children = state.get("children", {})
+if not children:
+    print("  No active sessions.")
+    sys.exit(0)
+
+RESUME_CMDS = {
+    "claude": "claude --resume {sid}",
+    "codex": "codex resume {sid}",
+}
+
+for slot, info in sorted(children.items(), key=lambda x: int(x[0])):
+    window = info.get("window_name", "?")
+    sid = info.get("agent_session_id", "")
+    label = info.get("session_label", "")
+    topic = info.get("topic_summary", "")[:60]
+    pool = info.get("pool_name", "")
+    print(f"  Slot {slot} ({window}, pool={pool or 'default'}):")
+    if label:
+        print(f"    Label: {label}")
+    if topic:
+        print(f"    Topic: {topic}")
+    if sid:
+        print(f"    Session ID: {sid}")
+        # Build the correct resume command for the pool
+        tmpl = RESUME_CMDS.get(pool, "")
+        if tmpl:
+            print(f"    Resume:     {tmpl.format(sid=sid)}")
+        else:
+            print(f"    Resume:     (unknown runtime '{pool}')")
+    else:
+        print(f"    Session ID: (not available)")
+    print()
+PYEOF
+    ;;
+
+  resume)
+    SLOT="${REMAINING_ARGS[1]:-}"
+    if [ -z "$SLOT" ]; then
+      echo "Usage: homeboundctl.sh resume <slot>" >&2
+      echo "  Prints the resume command for a given slot." >&2
+      echo "  Use 'homeboundctl.sh sessions' to see all slots." >&2
+      exit 1
+    fi
+    STATE_FILE="${LOG_DIR}/children.json"
+    if [ ! -f "$STATE_FILE" ]; then
+      echo "No state file found." >&2
+      exit 1
+    fi
+    RESUME_CMD=$($PY - "$STATE_FILE" "$SLOT" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    state = json.load(f)
+slot = sys.argv[2]
+child = state.get("children", {}).get(slot)
+if not child:
+    sys.exit(0)
+sid = child.get("agent_session_id", "")
+pool = child.get("pool_name", "")
+if not sid:
+    sys.exit(0)
+cmds = {"claude": f"claude --resume {sid}", "codex": f"codex resume {sid}"}
+print(cmds.get(pool, ""))
+PYEOF
+    )
+    if [ -z "$RESUME_CMD" ]; then
+      echo "No session ID found for slot ${SLOT}." >&2
+      echo "The session may be a non-resumable runtime or the ID was not captured." >&2
+      exit 1
+    fi
+    echo "$RESUME_CMD"
+    echo ""
+    echo "Run the above command from any terminal to resume this session."
+    echo "Note: The tmux session may still be running. Use 'close' in Slack first"
+    echo "if you want to take over the session exclusively."
+    ;;
+
   *)
     echo "Usage: homeboundctl.sh [--config <path>] <command>"
     echo ""
@@ -296,6 +383,8 @@ case "$CMD" in
     echo "  stop         Stop orchestrator only (children survive)"
     echo "  stop-all     Stop everything (orchestrator + all children)"
     echo "  status       Show tmux windows"
+    echo "  sessions     Show session IDs for resume"
+    echo "  resume N     Print resume command for slot N"
     echo "  health       Full system health report"
     echo "  attach       Attach to the tmux session"
     echo "  logs         Tail the log file"

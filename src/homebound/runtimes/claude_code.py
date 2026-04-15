@@ -5,6 +5,9 @@ Implements the AgentRuntime interface for Claude Code interactive CLI.
 
 from __future__ import annotations
 
+import shlex
+from pathlib import Path
+
 from homebound.adapters.runtime import AgentRuntime
 
 
@@ -45,3 +48,22 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     def exit_command(self) -> str:
         return self._exit_cmd
+
+    def supports_session_resume(self) -> bool:
+        return True
+
+    def start_command(
+        self, project_dir: Path, session_id: str = "", session_name: str = "",
+    ) -> str:
+        extras = ""
+        if session_id:
+            extras += f" --session-id {session_id}"
+        if session_name:
+            extras += f" --name {shlex.quote(session_name)}"
+        return (
+            f"cd {shlex.quote(str(project_dir))} && "
+            f"{self._unset_prefix}{self.command}{extras}"
+        )
+
+    def resume_command(self, session_id: str) -> str:
+        return f"claude --resume {session_id}"
